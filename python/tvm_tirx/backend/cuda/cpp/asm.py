@@ -398,20 +398,22 @@ def codegen_cuda_mov_sreg(bits, reg):
 device_intrinsic(
     "cuda.wgmma_noop_barrier_uint32",
     helper_name="ptx_wgmma_fence_uint32_t",
-    c_signature="(uint32_t reg)",
+    c_signature="(uint32_t& reg)",
     body='    asm volatile("" : "+r"(reg) :: "memory");',
 )
 device_intrinsic(
     "cuda.wgmma_noop_barrier_float32",
     helper_name="ptx_wgmma_fence_float",
-    c_signature="(float reg)",
+    c_signature="(float& reg)",
     body='    asm volatile("" : "+f"(reg) :: "memory");',
 )
 
 
 @register_codegen("cuda.wgmma_noop_barrier")
 def codegen_cuda_wgmma_noop_barrier(reg):
-    dtype = str(reg.dtype)
+    # By-reference helpers: the empty asm must pin the accumulator register
+    # itself (CUTLASS warpgroup_fence_operand), not a by-value copy of it.
+    dtype = str(reg.expr_ty().dtype)
     dtype_enum = PTXDataType.from_string(dtype)
     if dtype_enum == PTXDataType.UINT32:
         op_name = "tirx.cuda.wgmma_noop_barrier_uint32"

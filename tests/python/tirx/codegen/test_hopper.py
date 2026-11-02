@@ -19,6 +19,7 @@
 # ruff: noqa: F841
 # pylint: disable=missing-function-docstring
 import math
+import re
 
 import numpy as np
 import pytest
@@ -1029,6 +1030,34 @@ def test_cp_async_bulk_tensor_shared_to_global(inputs):
         np.testing.assert_allclose(A.numpy(), A_ref)
 
     tvm_tirx.testing.run_with_gpu_lock(run_and_check)
+
+
+@pytest.mark.parametrize("dtype", ["float32", "uint32"])
+def test_wgmma_noop_barrier_fences_register_by_reference(dtype):
+    """The accumulator fence must pin the register itself, like CUTLASS's
+    warpgroup_fence_operand: its helper takes the operand by reference, and
+    the call site passes the local element, not a copy."""
+    cpp_type = {"float32": "float", "uint32": "uint32_t"}[dtype]
+
+    # fmt: off
+    @T.function
+    def main(Out: T.Tensor((128, 4), dtype)):
+        T.device_entry(launch=T.cuda.LaunchConfig(grid=1, block=128))
+        tx = T.cuda.thread_idx("x")
+        acc = T.alloc_tensor(ty_args=[T.Tensor((4,), dtype, scope="local")])
+        for i in T.serial(0, 4):
+            acc[i] = T.Cast(dtype, i)
+            T.cuda.wgmma.noop_barrier(acc[i])
+        for i in T.serial(0, 4):
+            Out[tx, i] = acc[i]
+    # fmt: on
+
+    target = tvm_tirx.target.Target({"kind": "cuda", "arch": "sm_90a"})
+    mod = tvm_tirx.compile(tvm_tirx.IRModule({"main": main}), target=target, pipeline="tirx")
+    src = mod.mod.imports[0].inspect_source()
+    helper = f"ptx_wgmma_fence_{cpp_type}"
+    assert f"{helper}({cpp_type}& reg)" in src
+    assert re.search(rf"{helper}\(\w+\[\w+\]\);", src), src
 
 
 @pytest.mark.gpu
