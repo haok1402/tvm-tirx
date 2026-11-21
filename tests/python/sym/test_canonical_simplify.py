@@ -431,6 +431,45 @@ def test_simplify_normalize_min_value_expr():
     ck.verify(0 == x + tvm_tirx.tirx.min_value(ty="int32"), tirx.const(False, "bool"))
 
 
+def test_canonical_form_literals_exceeding_type():
+    """Canonical coefficients are unbounded, but a normal form needs literals of the type.
+
+    When distributing or folding constants yields a literal outside the type, the node is
+    simplified by the rewrite rules instead of failing in IntImm.
+    """
+    ck = CanonicalChecker()
+    x = tvm_tirx.tirx.Var("x", "int32")
+    y = tvm_tirx.tirx.Var("y", "int64")
+    tdiv = tvm_tirx.tirx.truncdiv
+
+    # Distributing the scale would need x * 4 - 2^32 and (x // 3) * 8 - 2^32.
+    ck.verify((x - 2**30) * 4, (x - 2**30) * 4)
+    ck.verify((x // 3 - 2**29) * 8, (x // 3 - 2**29) * 8)
+    ck.verify((y - T.int64(2**62)) * T.int64(4), (y - T.int64(2**62)) * T.int64(4))
+    # LowerIntrin shifts a dividend of unknown sign: floordiv(x, 43) = truncdiv(x + 43c, 43) - c.
+    # Scaling it by 256 would need the constant -256c = -6392509696.
+    shift = 24970741
+    shifted = (tdiv(x + 43 * shift, 43) - shift) * 256
+    ck.verify(shifted, shifted)
+    # Forms whose literals fit are still canonicalized.
+    ck.verify((x - 2**20) * 4, x * 4 - 2**22)
+    ck.verify((tdiv(x + 43 * shift, 43) - shift) * 8, tdiv(x + 43 * shift, 43) * 8 - 8 * shift)
+
+    # A binding is canonicalized, then rewritten, when it is ingested.
+    row = tvm_tirx.tirx.Var("row", "int32")
+    ck.constraints.append(tvm_tirx.sym.BindingConstraint(row, shifted))
+    ck.analyzer.sync_constraint_context(ck.constraints)
+    ck.verify(row + 1, (tdiv(x + 43 * shift, 43) + (-shift)) * 256 + 1)
+
+    # Pushing a cast into a sum checks the literals in the target type.
+    ck.constraints.append(
+        tvm_tirx.sym.RangeConstraint(y, tvm_tirx.ir.Range(T.int64(0), T.int64(10)))
+    )
+    ck.analyzer.sync_constraint_context(ck.constraints)
+    cast = tvm_tirx.tirx.Cast("int32", y + T.int64(2**40))
+    ck.verify(cast, cast)
+
+
 def test_proddiv_simplify():
     ck = CanonicalChecker()
     flm = tvm_tirx.tirx.floormod

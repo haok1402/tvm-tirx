@@ -117,6 +117,36 @@ bool CastIsSafe(PrimType dtype, PrimExpr value, AnalyzerObj* analyzer) {
 }
 
 /*!
+ * \brief Signals that a canonical form needs a literal that does not fit its type.
+ *
+ * Canonical coefficients are BigInt, so wide intermediates are allowed as long as they are
+ * narrowed before they are materialized, e.g. int64 (16 + 48 * (x - 2^61)) / 16. Distributing
+ * a scale can also leave a form that never narrows although its input fits the type, e.g.
+ * int32 (x - 2^30) * 4 -> x * 4 - 2^32. The simplifier catches this signal and simplifies the
+ * node whose operand could not be materialized with the rewrite rules instead.
+ */
+struct NormalFormOverflow {};
+
+/*!
+ * \brief Build a literal of a normal form.
+ * \param dtype The integer type of the literal.
+ * \param value The value.
+ * \return IntImm(dtype, value).
+ * \throws NormalFormOverflow if value does not fit dtype.
+ */
+IntImm NormalFormLiteral(const PrimType& dtype, const ffi::BigInt& value) {
+  bool fits;
+  if (dtype.code() == DLDataTypeCode::kDLUInt) {
+    fits = value >= 0 && value < (ffi::BigInt(1) << dtype.bits());
+  } else {
+    ffi::BigInt limit = ffi::BigInt(1) << (dtype.bits() - 1);
+    fits = value >= -limit && value < limit;
+  }
+  if (!fits) throw NormalFormOverflow();
+  return IntImm(dtype, value);
+}
+
+/*!
  * \brief Internal "Split normal form" of expression.
  *
  * This is a special expression that represents
@@ -155,15 +185,15 @@ class SplitExprObj : public CanonicalExprObj {
       return IntImm(dtype, 0);
     }
     if (this->upper_factor.has_value()) {
-      res = ModImpl(res, IntImm(dtype, *this->upper_factor), div_mode);
+      res = ModImpl(res, NormalFormLiteral(dtype, *this->upper_factor), div_mode);
     }
     if (this->lower_factor != 1) {
-      res = DivImpl(res, IntImm(dtype, this->lower_factor), div_mode);
+      res = DivImpl(res, NormalFormLiteral(dtype, this->lower_factor), div_mode);
     }
     sscale *= this->scale;
     if (sscale != 1) {
       TVM_FFI_ICHECK(dtype.code() != DLDataTypeCode::kDLUInt || sscale > 0);
-      res = res * IntImm(dtype, sscale);
+      res = res * NormalFormLiteral(dtype, sscale);
     }
     return res;
   }
@@ -202,20 +232,20 @@ class SplitExprObj : public CanonicalExprObj {
       return false;
     }
     if (this->upper_factor.has_value()) {
-      res = ModImpl(res, IntImm(self_dtype, *this->upper_factor), div_mode);
+      res = ModImpl(res, NormalFormLiteral(self_dtype, *this->upper_factor), div_mode);
       if (!CastIsSafe(dtype, res, analyzer)) {
         return false;
       }
     }
     if (this->lower_factor != 1) {
-      res = DivImpl(res, IntImm(self_dtype, this->lower_factor), div_mode);
+      res = DivImpl(res, NormalFormLiteral(self_dtype, this->lower_factor), div_mode);
       if (!CastIsSafe(dtype, res, analyzer)) {
         return false;
       }
     }
     if (this->scale != 1) {
       TVM_FFI_ICHECK(self_dtype.code() != DLDataTypeCode::kDLUInt || this->scale > 0);
-      res = res * IntImm(self_dtype, this->scale);
+      res = res * NormalFormLiteral(self_dtype, this->scale);
       if (!CastIsSafe(dtype, res, analyzer)) {
         return false;
       }
@@ -283,7 +313,7 @@ class SumExprObj : public CanonicalExprObj {
     PrimType dtype = this->ExprObj::ty.as_or_throw<PrimType>();
     // quick path 1.
     if (this->args.size() == 0) {
-      return IntImm(dtype, this->base);
+      return NormalFormLiteral(dtype, this->base);
     }
     return Normalize_(dtype, SimplifySplitExprs(args), base);
   }
@@ -391,7 +421,7 @@ class SumExprObj : public CanonicalExprObj {
       }
     }
     if ((base > 0 && !is_negated_min_value) || is_min_value) {
-      res = res + IntImm(dtype, base);
+      res = res + NormalFormLiteral(dtype, base);
       if (!CastIsSafe(dtype, res, analyzer)) {
         return false;
       }
@@ -407,7 +437,7 @@ class SumExprObj : public CanonicalExprObj {
     }
     // Subtract the negative boundary after nonconstant terms to avoid folding 0 - min_value.
     if ((base < 0 && !is_min_value) || is_negated_min_value) {
-      res = res - IntImm(dtype, -base);
+      res = res - NormalFormLiteral(dtype, -base);
       if (!CastIsSafe(dtype, res, analyzer)) {
         return false;
       }
@@ -552,7 +582,7 @@ class SumExprObj : public CanonicalExprObj {
       }
     }
     if ((base > 0 && !is_negated_min_value) || is_min_value) {
-      res = res + IntImm(dtype, base);
+      res = res + NormalFormLiteral(dtype, base);
     }
     // negative scales follows using sub.
     for (size_t i = 0; i < args.size(); ++i) {
@@ -562,7 +592,7 @@ class SumExprObj : public CanonicalExprObj {
     }
     // Subtract the negative boundary after nonconstant terms to avoid folding 0 - min_value.
     if ((base < 0 && !is_min_value) || is_negated_min_value) {
-      res = res - IntImm(dtype, -base);
+      res = res - NormalFormLiteral(dtype, -base);
     }
     return res;
   }
@@ -607,13 +637,23 @@ class CanonicalSimplifier::Impl : public RewriteSimplifier::Impl {
   // Normalize replacements; qualified parent calls bypass this root only.
   UnchangedOr<ffi::Any> Mutate(ffi::AnyView value,
                                InplaceMode inplace_mode = InplaceMode::kDisallow) final {
-    UnchangedOr<ffi::Any> expr_u = Rewriter::Mutate(value, inplace_mode);
+    UnchangedOr<ffi::Any> expr_u{ffi::Unchanged()};
+    try {
+      expr_u = Rewriter::Mutate(value, inplace_mode);
+    } catch (const NormalFormOverflow&) {
+      // Only CanonicalOrRewrite materializes operands; the signal must not leave this class.
+      TVM_FFI_THROW(InternalError) << "Unhandled canonical form overflow in " << value;
+    }
     try {
       // Only replacements need normalization; an unchanged result preserves the input form.
       if (expr_u.IsUnchanged()) return ffi::Unchanged();
       ffi::Any expr = std::move(expr_u).ValueUnchecked();
       if (auto prim_expr = expr.as<PrimExpr>()) {
-        return Normalize(*std::move(prim_expr));
+        try {
+          return Normalize(*std::move(prim_expr));
+        } catch (const NormalFormOverflow&) {
+          return RewriteNode(value);
+        }
       }
       return expr;
     } catch (ffi::Error& error) {
@@ -623,15 +663,33 @@ class CanonicalSimplifier::Impl : public RewriteSimplifier::Impl {
   }
 
   using Rewriter::Mutate_;
-  UnchangedOr<PrimExpr> Mutate_(const prim::AddObj* op, InplaceMode inplace_mode) final;
-  UnchangedOr<PrimExpr> Mutate_(const prim::SubObj* op, InplaceMode inplace_mode) final;
-  UnchangedOr<PrimExpr> Mutate_(const prim::MulObj* op, InplaceMode inplace_mode) final;
-  UnchangedOr<PrimExpr> Mutate_(const prim::DivObj* op, InplaceMode inplace_mode) final;
-  UnchangedOr<PrimExpr> Mutate_(const prim::ModObj* op, InplaceMode inplace_mode) final;
-  UnchangedOr<PrimExpr> Mutate_(const prim::FloorDivObj* op, InplaceMode inplace_mode) final;
-  UnchangedOr<PrimExpr> Mutate_(const prim::FloorModObj* op, InplaceMode inplace_mode) final;
-  UnchangedOr<PrimExpr> Mutate_(const prim::CastObj* op, InplaceMode inplace_mode) final;
-  UnchangedOr<PrimExpr> Mutate_(const prim::LTObj* op, InplaceMode inplace_mode) final;
+  UnchangedOr<PrimExpr> Mutate_(const prim::AddObj* op, InplaceMode inplace_mode) final {
+    return CanonicalOrRewrite(op, inplace_mode);
+  }
+  UnchangedOr<PrimExpr> Mutate_(const prim::SubObj* op, InplaceMode inplace_mode) final {
+    return CanonicalOrRewrite(op, inplace_mode);
+  }
+  UnchangedOr<PrimExpr> Mutate_(const prim::MulObj* op, InplaceMode inplace_mode) final {
+    return CanonicalOrRewrite(op, inplace_mode);
+  }
+  UnchangedOr<PrimExpr> Mutate_(const prim::DivObj* op, InplaceMode inplace_mode) final {
+    return CanonicalOrRewrite(op, inplace_mode);
+  }
+  UnchangedOr<PrimExpr> Mutate_(const prim::ModObj* op, InplaceMode inplace_mode) final {
+    return CanonicalOrRewrite(op, inplace_mode);
+  }
+  UnchangedOr<PrimExpr> Mutate_(const prim::FloorDivObj* op, InplaceMode inplace_mode) final {
+    return CanonicalOrRewrite(op, inplace_mode);
+  }
+  UnchangedOr<PrimExpr> Mutate_(const prim::FloorModObj* op, InplaceMode inplace_mode) final {
+    return CanonicalOrRewrite(op, inplace_mode);
+  }
+  UnchangedOr<PrimExpr> Mutate_(const prim::CastObj* op, InplaceMode inplace_mode) final {
+    return CanonicalOrRewrite(op, inplace_mode);
+  }
+  UnchangedOr<PrimExpr> Mutate_(const prim::LTObj* op, InplaceMode inplace_mode) final {
+    return CanonicalOrRewrite(op, inplace_mode);
+  }
 
  private:
   /*!
@@ -663,6 +721,48 @@ class CanonicalSimplifier::Impl : public RewriteSimplifier::Impl {
     return bound->min_value != ConstIntBound::kNegInf &&
            ffi::BigInt(bound->min_value) + shift >= type_min;
   }
+
+  UnchangedOr<PrimExpr> CanonicalMutate_(const prim::AddObj* op, InplaceMode inplace_mode);
+  UnchangedOr<PrimExpr> CanonicalMutate_(const prim::SubObj* op, InplaceMode inplace_mode);
+  UnchangedOr<PrimExpr> CanonicalMutate_(const prim::MulObj* op, InplaceMode inplace_mode);
+  UnchangedOr<PrimExpr> CanonicalMutate_(const prim::DivObj* op, InplaceMode inplace_mode);
+  UnchangedOr<PrimExpr> CanonicalMutate_(const prim::ModObj* op, InplaceMode inplace_mode);
+  UnchangedOr<PrimExpr> CanonicalMutate_(const prim::FloorDivObj* op, InplaceMode inplace_mode);
+  UnchangedOr<PrimExpr> CanonicalMutate_(const prim::FloorModObj* op, InplaceMode inplace_mode);
+  UnchangedOr<PrimExpr> CanonicalMutate_(const prim::CastObj* op, InplaceMode inplace_mode);
+  UnchangedOr<PrimExpr> CanonicalMutate_(const prim::LTObj* op, InplaceMode inplace_mode);
+
+  /*!
+   * \brief Simplify op to canonical form, or by the rewrite rules if an operand's normal form
+   *        does not fit its type (see NormalFormOverflow).
+   */
+  template <typename TNode>
+  UnchangedOr<PrimExpr> CanonicalOrRewrite(const TNode* op, InplaceMode inplace_mode) {
+    if (rewrite_node_ == op) {
+      rewrite_node_ = nullptr;
+      return Rewriter::Mutate_(op, InplaceMode::kDisallow);
+    }
+    try {
+      return CanonicalMutate_(op, inplace_mode);
+    } catch (const NormalFormOverflow&) {
+      // In-place updates of the operands preserve their values, so op is still valid.
+      return Rewriter::Mutate_(op, InplaceMode::kDisallow);
+    }
+  }
+
+  /*!
+   * \brief Simplify value by the rewrite rules when its own normal form does not fit its type.
+   * \note The operands are still simplified to canonical form.
+   */
+  UnchangedOr<ffi::Any> RewriteNode(ffi::AnyView value) {
+    rewrite_node_ = value.as<ffi::Object>();
+    UnchangedOr<ffi::Any> result = Rewriter::Mutate(value, InplaceMode::kDisallow);
+    rewrite_node_ = nullptr;
+    return result;
+  }
+
+  /*! \brief The node that CanonicalOrRewrite simplifies by the rewrite rules only. */
+  const ffi::Object* rewrite_node_{nullptr};
 
   // This query retains the rewriter's bounded int64 analysis and its existing cost.
   CompareResult TryCompareConstant(const PrimExpr& expr, const ffi::BigInt& value) {
@@ -794,8 +894,8 @@ class CanonicalSimplifier::Impl : public RewriteSimplifier::Impl {
   }
 };
 
-UnchangedOr<PrimExpr> CanonicalSimplifier::Impl::Mutate_(const prim::AddObj* op,
-                                                         InplaceMode inplace_mode) {
+UnchangedOr<PrimExpr> CanonicalSimplifier::Impl::CanonicalMutate_(const prim::AddObj* op,
+                                                                  InplaceMode inplace_mode) {
   if (!IsIndexTypedExpr(op)) {
     return Rewriter::Mutate_(op, inplace_mode);
   }
@@ -821,8 +921,8 @@ UnchangedOr<PrimExpr> CanonicalSimplifier::Impl::Mutate_(const prim::AddObj* op,
   return ret;
 }
 
-UnchangedOr<PrimExpr> CanonicalSimplifier::Impl::Mutate_(const prim::SubObj* op,
-                                                         InplaceMode inplace_mode) {
+UnchangedOr<PrimExpr> CanonicalSimplifier::Impl::CanonicalMutate_(const prim::SubObj* op,
+                                                                  InplaceMode inplace_mode) {
   if (!IsIndexTypedExpr(op)) {
     return Rewriter::Mutate_(op, inplace_mode);
   }
@@ -848,8 +948,8 @@ UnchangedOr<PrimExpr> CanonicalSimplifier::Impl::Mutate_(const prim::SubObj* op,
   return ret;
 }
 
-UnchangedOr<PrimExpr> CanonicalSimplifier::Impl::Mutate_(const prim::MulObj* op,
-                                                         InplaceMode inplace_mode) {
+UnchangedOr<PrimExpr> CanonicalSimplifier::Impl::CanonicalMutate_(const prim::MulObj* op,
+                                                                  InplaceMode inplace_mode) {
   if (!IsIndexTypedExpr(op)) {
     return Rewriter::Mutate_(op, inplace_mode);
   }
@@ -1028,8 +1128,8 @@ bool CanonicalSimplifier::Impl::ProdDivSimplify(PrimExpr* plhs, PrimExpr* prhs,
   return true;
 }
 
-UnchangedOr<PrimExpr> CanonicalSimplifier::Impl::Mutate_(const prim::DivObj* op,
-                                                         InplaceMode inplace_mode) {
+UnchangedOr<PrimExpr> CanonicalSimplifier::Impl::CanonicalMutate_(const prim::DivObj* op,
+                                                                  InplaceMode inplace_mode) {
   if (!IsIndexTypedExpr(op)) {
     return Rewriter::Mutate_(op, inplace_mode);
   }
@@ -1094,8 +1194,8 @@ UnchangedOr<PrimExpr> CanonicalSimplifier::Impl::Mutate_(const prim::DivObj* op,
   }
 }
 
-UnchangedOr<PrimExpr> CanonicalSimplifier::Impl::Mutate_(const prim::FloorDivObj* op,
-                                                         InplaceMode inplace_mode) {
+UnchangedOr<PrimExpr> CanonicalSimplifier::Impl::CanonicalMutate_(const prim::FloorDivObj* op,
+                                                                  InplaceMode inplace_mode) {
   if (!IsIndexTypedExpr(op)) {
     return Rewriter::Mutate_(op, inplace_mode);
   }
@@ -1253,8 +1353,8 @@ SplitExpr CanonicalSimplifier::Impl::SplitModConst(SplitExpr lhs, ffi::BigInt cv
   return lhs;
 }
 
-UnchangedOr<PrimExpr> CanonicalSimplifier::Impl::Mutate_(const prim::ModObj* op,
-                                                         InplaceMode inplace_mode) {
+UnchangedOr<PrimExpr> CanonicalSimplifier::Impl::CanonicalMutate_(const prim::ModObj* op,
+                                                                  InplaceMode inplace_mode) {
   if (!IsIndexTypedExpr(op)) {
     return Rewriter::Mutate_(op, inplace_mode);
   }
@@ -1330,8 +1430,8 @@ UnchangedOr<PrimExpr> CanonicalSimplifier::Impl::Mutate_(const prim::ModObj* op,
   }
 }
 
-UnchangedOr<PrimExpr> CanonicalSimplifier::Impl::Mutate_(const prim::FloorModObj* op,
-                                                         InplaceMode inplace_mode) {
+UnchangedOr<PrimExpr> CanonicalSimplifier::Impl::CanonicalMutate_(const prim::FloorModObj* op,
+                                                                  InplaceMode inplace_mode) {
   if (!IsIndexTypedExpr(op)) {
     return Rewriter::Mutate_(op, inplace_mode);
   }
@@ -1401,8 +1501,8 @@ UnchangedOr<PrimExpr> CanonicalSimplifier::Impl::Mutate_(const prim::FloorModObj
   }
 }
 
-UnchangedOr<PrimExpr> CanonicalSimplifier::Impl::Mutate_(const prim::CastObj* op,
-                                                         InplaceMode inplace_mode) {
+UnchangedOr<PrimExpr> CanonicalSimplifier::Impl::CanonicalMutate_(const prim::CastObj* op,
+                                                                  InplaceMode inplace_mode) {
   // The cast reasoning below is index-centric; for unsigned operands it runs
   // only under the caller's no-overflow assertion (AllowUIntAsIndex).
   if (!IsIndexTypedExpr(op) &&
@@ -1430,8 +1530,8 @@ UnchangedOr<PrimExpr> CanonicalSimplifier::Impl::Mutate_(const prim::CastObj* op
   return Rewriter::Mutate_(op, inplace_mode);
 }
 
-UnchangedOr<PrimExpr> CanonicalSimplifier::Impl::Mutate_(const prim::LTObj* op,
-                                                         InplaceMode inplace_mode) {
+UnchangedOr<PrimExpr> CanonicalSimplifier::Impl::CanonicalMutate_(const prim::LTObj* op,
+                                                                  InplaceMode inplace_mode) {
   // Unsigned subtraction does not preserve comparison ordering.
   if (op->a->ty.as_or_throw<PrimType>().MatchesCode(DLDataTypeCode::kDLUInt)) {
     return Rewriter::Mutate_(op, inplace_mode);
