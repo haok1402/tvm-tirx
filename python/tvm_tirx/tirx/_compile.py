@@ -244,6 +244,13 @@ def compile(  # pylint: disable=redefined-builtin
         target: finalize_device_passes()(device_mod)
         for target, device_mod in device_mod_dict.items()
     }
+    for (target, _config), device_mod in device_mod_dict.items():
+        if Target(target).kind.name == "cuda":
+            from tvm_tirx.backend.cuda.verify import (  # pylint: disable=import-outside-toplevel
+                verify_setmaxnreg_launch_contract,
+            )
+
+            verify_setmaxnreg_launch_contract(device_mod)
 
     # Convert TIR IRModules to runtime Module by calling target.build. CUDA device
     # compiles run inside the C++ module factory; collect their ptxas performance
