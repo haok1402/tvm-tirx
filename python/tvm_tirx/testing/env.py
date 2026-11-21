@@ -167,6 +167,18 @@ def cuda_arch(device_id: int = 0) -> str | None:
         return None
 
 
+def runnable_cuda_arch(default: str = "sm_100a") -> str:
+    """The architecture a test should compile for when it launches its kernel.
+
+    ``default`` on a compute 10.0+ device or without a CUDA device. On an older
+    device, its own architecture (e.g. ``sm_90a``), so a test that also runs
+    there loads a binary built for it.
+    """
+    if not has_cuda() or has_cuda_compute(10):
+        return default
+    return cuda_arch() or default
+
+
 def has_cuda_arch(*arches: str, device_id: int = 0) -> bool:
     """True if a CUDA device exactly matches one of arches."""
     actual = cuda_arch(device_id)

@@ -18,16 +18,10 @@
 
 from pathlib import Path
 
-import pytest
-
-from tvm_tirx.testing import env
+from tvm_tirx.testing._pytest import cuda_compute_collection_modifyitems
 
 
 def pytest_collection_modifyitems(items):
-    if env.has_cuda_compute(10):
-        return
-    suite_root = Path(__file__).resolve().parent
-    skip = pytest.mark.skip(reason="requires a CUDA compute capability 10.0 device")
-    for item in items:
-        if Path(item.path).resolve().is_relative_to(suite_root):
-            item.add_marker(skip)
+    # Every test here, GPU or source-only, needs a device of at least its
+    # cuda_min_compute (default 10.0).
+    cuda_compute_collection_modifyitems(items, Path(__file__).resolve().parent, gpu_only=False)

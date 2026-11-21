@@ -133,14 +133,56 @@ def _release_cuda_cache_between_tests():
         torch.cuda.empty_cache()
 
 
-def codegen_collection_modifyitems(config, items, suite_root):
-    if env.has_cuda_compute(10):
-        return
+# The CUDA codegen and tile suites target sm_100 by default. A test that also
+# runs on older devices declares its floor with ``cuda_min_compute``.
+DEFAULT_MIN_CUDA_COMPUTE = (10, 0)
+
+
+def min_cuda_compute(item):
+    """The lowest CUDA compute capability ``item`` runs on, as ``(major, minor)``.
+
+    The closest ``cuda_min_compute(major, minor=0)`` marker wins, so a test can
+    override a module-level ``pytestmark``. Unmarked tests get
+    ``DEFAULT_MIN_CUDA_COMPUTE``.
+    """
+    marker = item.get_closest_marker("cuda_min_compute")
+    if marker is None:
+        return DEFAULT_MIN_CUDA_COMPUTE
+    args = tuple(marker.args)
+    if (
+        marker.kwargs
+        or len(args) not in (1, 2)
+        or not all(isinstance(arg, int) and arg >= 0 for arg in args)
+    ):
+        raise pytest.UsageError(
+            "cuda_min_compute marker takes (major, minor=0) as non-negative ints, "
+            f"got args={args} kwargs={marker.kwargs}"
+        )
+    return (args[0], args[1] if len(args) == 2 else 0)
+
+
+def cuda_compute_collection_modifyitems(items, suite_root, *, gpu_only):
+    """Skip the tests under ``suite_root`` that the local device cannot run.
+
+    A test is skipped unless a CUDA device with at least its
+    :func:`min_cuda_compute` is present. With ``gpu_only``, tests without the
+    ``gpu`` marker are left alone.
+    """
     suite_root = Path(suite_root).resolve()
-    skip = pytest.mark.skip(reason="requires a CUDA compute capability 10.0 device")
     for item in items:
-        if (
-            Path(item.path).resolve().is_relative_to(suite_root)
-            and item.get_closest_marker("gpu") is not None
-        ):
-            item.add_marker(skip)
+        if not Path(item.path).resolve().is_relative_to(suite_root):
+            continue
+        if gpu_only and item.get_closest_marker("gpu") is None:
+            continue
+        major, minor = min_cuda_compute(item)
+        if not env.has_cuda_compute(major, minor):
+            item.add_marker(
+                pytest.mark.skip(
+                    reason=f"requires a CUDA compute capability {major}.{minor} device"
+                )
+            )
+
+
+def codegen_collection_modifyitems(config, items, suite_root):
+    del config
+    cuda_compute_collection_modifyitems(items, suite_root, gpu_only=True)

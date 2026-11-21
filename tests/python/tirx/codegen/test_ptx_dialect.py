@@ -29,6 +29,9 @@ from tvm_tirx.ir import Op
 from tvm_tirx.script import tirx as T
 from tvm_tirx.testing import env
 
+# Runs on Hopper too; tests that need sm_100 override this marker.
+pytestmark = pytest.mark.cuda_min_compute(9)
+
 TARGET = tvm_tirx.target.Target({"kind": "cuda", "arch": env.cuda_arch() or "sm_90"})
 
 
@@ -3129,7 +3132,7 @@ def test_ptx_95_sync_codegen():
     reason="fabric commit groups, proxy-restricted bulk waits and the alias fence are PTX 9.5",
 )
 @pytest.mark.skipif(
-    not env.has_cuda() or env.cuda_arch() is None or int(env.cuda_arch()[3:6]) < 100,
+    not env.has_cuda_compute(10),
     reason="needs an sm_100+ CUDA GPU",
 )
 def test_ptx_95_sync_gpu_executes():
@@ -3327,7 +3330,7 @@ def test_ptx_95_tensormap_alloc_class_codegen():
     not env.has_nvcc_version(13, 5), reason="tensor-map allocation classes are PTX 9.5"
 )
 @pytest.mark.skipif(
-    not env.has_cuda() or env.cuda_arch() is None or int(env.cuda_arch()[3:6]) < 90,
+    not env.has_cuda_compute(9),
     reason="needs an sm_90+ CUDA GPU",
 )
 def test_ptx_95_tensormap_alloc_class_gpu():

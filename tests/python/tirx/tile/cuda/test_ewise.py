@@ -33,6 +33,9 @@ from tvm_tirx.script import tirx as T
 from tvm_tirx.testing import env
 from tvm_tirx.tirx.layout import S, TileLayout
 
+# Runs on Hopper too; tests that need sm_100 override this marker.
+pytestmark = pytest.mark.cuda_min_compute(9)
+
 
 def _scalar(operation, src_dtype, dst_dtype, with_bias=False):
     source, destination = tvm_tirx.ir.PrimType(src_dtype), tvm_tirx.ir.PrimType(dst_dtype)

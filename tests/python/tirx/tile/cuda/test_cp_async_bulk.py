@@ -39,6 +39,9 @@ from tvm_tirx.tirx.layout import S, TileLayout
 from tvm_tirx.tirx.thread_scope import ThreadScope
 from tvm_tirx.tirx.tile.dispatch import DispatchContext, run_dispatch
 
+# Runs on Hopper too; tests that need sm_100 override this marker.
+pytestmark = pytest.mark.cuda_min_compute(9)
+
 BULK = "cp.async.bulk.shared::cluster.shared::cta.mbarrier::complete_tx::bytes"
 
 
@@ -95,12 +98,32 @@ def _count_s2c_ops(impl):
 # (shape, dtype, src_spec, dst_spec, expected_s2c_ops | "fail")
 # Dispatch assertion uses src_spec/dst_spec as given.
 # GPU correctness (all non-fail cases) uses src_spec as the layout for both CTAs.
+# The DSMEM bulk-copy pattern fails codegen on every arch ("Back optional
+# access"); the copying configs stay at the default floor until fixed.
+_DSMEM_PATTERN_BUG = pytest.mark.cuda_min_compute(10)
+
 DSMEM_CONFIGS = [
-    pytest.param((128, 64), "float16", S[128, 64], S[128, 64], 1, id="contiguous-2d"),
-    pytest.param((256,), "float16", S[256], S[256], 1, id="contiguous-1d"),
+    pytest.param(
+        (128, 64),
+        "float16",
+        S[128, 64],
+        S[128, 64],
+        1,
+        id="contiguous-2d",
+        marks=_DSMEM_PATTERN_BUG,
+    ),
+    pytest.param(
+        (256,), "float16", S[256], S[256], 1, id="contiguous-1d", marks=_DSMEM_PATTERN_BUG
+    ),
     # Stride gap: inner 128 contiguous, outer stride=256 (gap) → 8 bulk copies
     pytest.param(
-        (8, 128), "float16", S[(8, 128) : (256, 1)], S[(8, 128) : (256, 1)], 8, id="stride-gap"
+        (8, 128),
+        "float16",
+        S[(8, 128) : (256, 1)],
+        S[(8, 128) : (256, 1)],
+        8,
+        id="stride-gap",
+        marks=_DSMEM_PATTERN_BUG,
     ),
     # Different outer strides → 8 bulk copies in dispatch
     pytest.param(
@@ -110,6 +133,7 @@ DSMEM_CONFIGS = [
         S[(8, 128) : (512, 1)],
         8,
         id="partial-contiguity-diff-stride",
+        marks=_DSMEM_PATTERN_BUG,
     ),
     # Incompatible: row-major vs column-major does not admit a contiguous bulk chunk
     pytest.param(

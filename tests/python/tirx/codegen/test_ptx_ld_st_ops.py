@@ -23,6 +23,9 @@ import tvm_tirx
 from tvm_tirx.script import tirx as T
 from tvm_tirx.testing import env
 
+# Runs on Hopper too; tests that need sm_100 override this marker.
+pytestmark = pytest.mark.cuda_min_compute(9)
+
 
 def copy_ptx_form(num_bytes):
     return {

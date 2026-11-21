@@ -28,6 +28,9 @@ from tvm_tirx.script import tirx as T
 from tvm_tirx.testing import env
 from tvm_tirx.tirx.layout import ComposeLayout, S, TileLayout
 
+# Runs on Hopper too; tests that need sm_100 override this marker.
+pytestmark = pytest.mark.cuda_min_compute(9)
+
 
 @pytest.mark.skipif(not env.has_cuda_compute(8), reason="Ampere required")
 @pytest.mark.parametrize("k", [8, 16])

@@ -32,6 +32,9 @@ from tvm_tirx.backend.cuda.lang.clc import query_cancel_first_ctaid_x
 from tvm_tirx.script import tirx as T
 from tvm_tirx.testing import env
 
+# Runs on Hopper too; tests that need sm_100 override this marker.
+pytestmark = pytest.mark.cuda_min_compute(9)
+
 
 def _get_source(
     func: tvm_tirx.tirx.Function, target=None, backend_config=None
@@ -1309,7 +1312,7 @@ def test_mov_sreg_locality_domain_codegen():
     not env.has_nvcc_version(13, 5), reason="locality-domain special registers are PTX 9.5"
 )
 @pytest.mark.skipif(
-    not env.has_cuda() or env.cuda_arch() is None or int(env.cuda_arch()[3:6]) < 100,
+    not env.has_cuda_compute(10),
     reason="needs an sm_100+ CUDA GPU",
 )
 def test_mov_sreg_locality_domain_gpu():
