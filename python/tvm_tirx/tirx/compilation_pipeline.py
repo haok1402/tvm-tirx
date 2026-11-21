@@ -208,6 +208,8 @@ def finalize_device_passes():  # pylint: disable=unused-argument
     device_pass_list = [
         tirx.transform.StmtSimplify(),
         tirx.transform.LowerIntrin(),
+        # Reject PTX the device target arch cannot run, at its TIRx source, before NVRTC.
+        cuda_transform.VerifyPTXTarget(),
     ]
     return tvm_tirx.ir.transform.Sequential(device_pass_list)
 

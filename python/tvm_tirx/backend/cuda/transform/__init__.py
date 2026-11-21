@@ -20,6 +20,8 @@
 
 from tvm_ffi import get_global_func
 
+from .verify_ptx_target import PTXTargetError, VerifyPTXTarget
+
 
 def LowerIket():
     """Lower frontend-only NVIDIA IKET annotations.
