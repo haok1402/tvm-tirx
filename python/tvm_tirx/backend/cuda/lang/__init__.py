@@ -19,11 +19,14 @@
 from importlib import import_module
 
 __all__ = [
+    "WGMMA",
     "BaseTileScheduler",
     "ClusterPersistentScheduler2D",
     "FlashAttentionLPTScheduler",
     "FlashAttentionLinearScheduler",
     "MBarrier",
+    "NamedBarrier",
+    "NamedBarriers",
     "Pipeline",
     "PipelineState",
     "SMEMPool",
@@ -33,6 +36,8 @@ __all__ = [
 
 _HELPER_MODULES = {
     "MBarrier": ".pipeline",
+    "NamedBarrier": ".named_barrier",
+    "NamedBarriers": ".named_barrier",
     "Pipeline": ".pipeline",
     "PipelineState": ".pipeline",
     "BaseTileScheduler": ".tile_scheduler",
@@ -42,6 +47,7 @@ _HELPER_MODULES = {
     "SMEMPool": ".alloc_pool",
     "TCGen05Bar": ".pipeline",
     "TMABar": ".pipeline",
+    "WGMMA": ".wgmma",
 }
 
 
