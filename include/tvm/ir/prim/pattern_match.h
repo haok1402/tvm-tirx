@@ -137,6 +137,18 @@ class PVecDataType : public PVarWithCheck<PVecDataType, DLDataType> {
   DLDataType elem_dtype_;
 };
 
+namespace detail {
+/*!
+ * \brief Number of literal folds that PBinaryExpr::Eval declined on this thread.
+ *
+ * TryConstFold declines to fold two literals when the result does not fit their type (or
+ * does not exist, e.g. division by zero), and Eval then builds the operation unfolded, which
+ * wraps or traps at runtime instead of computing the intended constant. A rewrite rule can
+ * compare this count before and after evaluating its result to detect that.
+ */
+inline thread_local uint64_t declined_literal_folds = 0;
+}  // namespace detail
+
 /*!
  * \brief Pattern binary expression.
  * \tparam OpType The AST noderef type.
@@ -170,6 +182,9 @@ class PBinaryExpr : public Pattern<PBinaryExpr<OpType, TA, TB, kFoldConstants>> 
     PrimExpr rhs = b_.Eval();
     if constexpr (kFoldConstants) {
       if (auto ret = prim::TryConstFold<OpType>(lhs, rhs)) return ret.value();
+      if (lhs.template as<IntImmObj>() && rhs.template as<IntImmObj>()) {
+        ++detail::declined_literal_folds;
+      }
     }
     return OpType(lhs, rhs);
   }

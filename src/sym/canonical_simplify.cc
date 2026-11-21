@@ -634,6 +634,25 @@ class CanonicalSimplifier::Impl : public RewriteSimplifier::Impl {
   UnchangedOr<PrimExpr> Mutate_(const prim::LTObj* op, InplaceMode inplace_mode) final;
 
  private:
+  /*!
+   * \brief Whether adding shift to a value within bound stays within dtype.
+   *
+   * Reducing a constant offset modulo the divisor introduces a new sum, which can overflow
+   * although the original one does not, e.g. int32 floormod(x - 35, c) -> floormod(x + c - 35, c).
+   */
+  static bool ShiftFitsType(const ConstIntBound& bound, const ffi::BigInt& shift, PrimType dtype) {
+    if (shift == 0) return true;
+    bool is_signed = dtype.MatchesCode(DLDataTypeCode::kDLInt);
+    ffi::BigInt type_min = is_signed ? -(ffi::BigInt(1) << (dtype.bits() - 1)) : ffi::BigInt(0);
+    ffi::BigInt type_max = (ffi::BigInt(1) << (dtype.bits() - is_signed)) - 1;
+    if (shift > 0) {
+      return bound->max_value != ConstIntBound::kPosInf &&
+             ffi::BigInt(bound->max_value) + shift <= type_max;
+    }
+    return bound->min_value != ConstIntBound::kNegInf &&
+           ffi::BigInt(bound->min_value) + shift >= type_min;
+  }
+
   // This query retains the rewriter's bounded int64 analysis and its existing cost.
   CompareResult TryCompareConstant(const PrimExpr& expr, const ffi::BigInt& value) {
     if (auto bounded_value = value.as<int64_t>(); bounded_value.has_value()) {
@@ -1267,7 +1286,8 @@ UnchangedOr<PrimExpr> CanonicalSimplifier::Impl::Mutate_(const prim::ModObj* op,
       // (x - 5) % 3 => (x - 2) % 3 if x - 5 >= 0
       auto cbound = analyzer_->const_int_bound(Normalize(a));
       ffi::BigInt new_base = psum->base % cval;
-      if (cbound->min_value >= 0 && cbound->min_value - psum->base + new_base >= 0) {
+      if (cbound->min_value >= 0 && cbound->min_value - psum->base + new_base >= 0 &&
+          ShiftFitsType(cbound, new_base - psum->base, a.ty())) {
         SumExpr sum_expr = a.as_or_throw<SumExpr>();
         sum_expr.CopyOnWrite()->base = new_base;
         return SplitModConst(ToSplitExpr(std::move(sum_expr)), cval, kTruncDiv, inplace_mode);
@@ -1334,10 +1354,14 @@ UnchangedOr<PrimExpr> CanonicalSimplifier::Impl::Mutate_(const prim::FloorModObj
         }
       }
       // Simplify the offset constant if necessary.
-      // floormod(x - 5, 3) => floormod(x + 1, 3)
+      // floormod(x - 5, 3) => floormod(x + 1, 3), if x + 1 cannot overflow.
       ffi::BigInt new_base = ffi::floormod(psum->base, cval);
       SumExpr sum_expr = std::move(a).as_or_throw<SumExpr>();
-      sum_expr.CopyOnWrite()->base = new_base;
+      if (new_base != sum_expr->base &&
+          ShiftFitsType(analyzer_->const_int_bound(Normalize(sum_expr)), new_base - sum_expr->base,
+                        sum_expr.ty())) {
+        sum_expr.CopyOnWrite()->base = new_base;
+      }
       return SplitModConst(ToSplitExpr(std::move(sum_expr)), cval, kFloorDiv, inplace_mode);
     } else {
       // if a >= 0 && a < cval, then result == a

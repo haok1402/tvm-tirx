@@ -34,6 +34,7 @@
 
 #include <algorithm>
 #include <numeric>
+#include <optional>
 #include <tuple>
 #include <utility>
 
@@ -67,36 +68,55 @@ TVM_FFI_STATIC_INIT_BLOCK() { RewriteSimplifierStatsObj::RegisterReflection(); }
 //     TVM_TRY_REWRITE(MatchesOneOf(floormod(x*c1,c2), floormod(x*c1 + c3, c2)),
 //                     floormod(x*floormod(c1,c2) + floormod(c3,c2), c2))
 
+// Evaluate the result of a matched rule. A rule whose result needs a constant that does not
+// fit its type (e.g. c1 * c2 overflowing int32) does not apply: the unfolded literal operation
+// would wrap at runtime, so the rule falls through to the next one.
+template <typename TPattern>
+std::optional<PrimExpr> EvalRewriteResult(const TPattern& pattern) {
+  uint64_t declined = ::tvm::detail::declined_literal_folds;
+  PrimExpr result = pattern.Eval();
+  if (::tvm::detail::declined_literal_folds != declined) return std::nullopt;
+  return result;
+}
+
 // macro for doing simple rewrite
-#define TVM_TRY_REWRITE(SrcExpr, ResExpr) \
-  RecordAttemptedRewrite();               \
-  if ((SrcExpr).Match(ret)) {             \
-    RecordRewrite();                      \
-    return (ResExpr).Eval();              \
+#define TVM_TRY_REWRITE(SrcExpr, ResExpr)                              \
+  RecordAttemptedRewrite();                                            \
+  if ((SrcExpr).Match(ret)) {                                          \
+    if (std::optional<PrimExpr> result = EvalRewriteResult(ResExpr)) { \
+      RecordRewrite();                                                 \
+      return *std::move(result);                                       \
+    }                                                                  \
   }
 
 // macro for rewrite + recursively rewrite ResExpr
-#define TVM_TRY_RECURSIVE_REWRITE(SrcExpr, ResExpr)          \
-  RecordAttemptedRewrite();                                  \
-  if ((SrcExpr).Match(ret)) {                                \
-    RecordRewrite();                                         \
-    return RecursiveRewrite((ResExpr).Eval(), inplace_mode); \
+#define TVM_TRY_RECURSIVE_REWRITE(SrcExpr, ResExpr)                    \
+  RecordAttemptedRewrite();                                            \
+  if ((SrcExpr).Match(ret)) {                                          \
+    if (std::optional<PrimExpr> result = EvalRewriteResult(ResExpr)) { \
+      RecordRewrite();                                                 \
+      return RecursiveRewrite(*std::move(result), inplace_mode);       \
+    }                                                                  \
   }
 
 // macro rewrite only if CondExor is true after match.
-#define TVM_TRY_REWRITE_IF(SrcExpr, ResExpr, CondExpr)      \
-  RecordAttemptedRewrite();                                 \
-  if ((SrcExpr).Match(ret, [&]() { return (CondExpr); })) { \
-    RecordRewrite();                                        \
-    return (ResExpr).Eval();                                \
+#define TVM_TRY_REWRITE_IF(SrcExpr, ResExpr, CondExpr)                 \
+  RecordAttemptedRewrite();                                            \
+  if ((SrcExpr).Match(ret, [&]() { return (CondExpr); })) {            \
+    if (std::optional<PrimExpr> result = EvalRewriteResult(ResExpr)) { \
+      RecordRewrite();                                                 \
+      return *std::move(result);                                       \
+    }                                                                  \
   }
 
 // macro rewrite + recursive_rewrite only if CondExor is true after match.
-#define TVM_TRY_RECURSIVE_REWRITE_IF(SrcExpr, ResExpr, CondExpr) \
-  RecordAttemptedRewrite();                                      \
-  if ((SrcExpr).Match(ret, [&]() { return (CondExpr); })) {      \
-    RecordRewrite();                                             \
-    return RecursiveRewrite((ResExpr).Eval(), inplace_mode);     \
+#define TVM_TRY_RECURSIVE_REWRITE_IF(SrcExpr, ResExpr, CondExpr)       \
+  RecordAttemptedRewrite();                                            \
+  if ((SrcExpr).Match(ret, [&]() { return (CondExpr); })) {            \
+    if (std::optional<PrimExpr> result = EvalRewriteResult(ResExpr)) { \
+      RecordRewrite();                                                 \
+      return RecursiveRewrite(*std::move(result), inplace_mode);       \
+    }                                                                  \
   }
 
 // NOTE for developers:
@@ -914,7 +934,8 @@ UnchangedOr<PrimExpr> RewriteSimplifier::Impl::Mutate_(const prim::FloorDivObj* 
                        c1.Eval()->value > 0 && c2.Eval()->value > 0);
 
     TVM_TRY_REWRITE_IF(floordiv(floordiv(x, c1) + c2, c3), floordiv(x + c1 * c2, c1 * c3),
-                       c1.Eval()->value > 0 && c3.Eval()->value > 0);
+                       c1.Eval()->value > 0 && c3.Eval()->value > 0 &&
+                           AffineFitsType(x.Eval(), 1, c1.Eval()->value * c2.Eval()->value));
 
     if (floordiv(x * c1 + y, c2).Match(ret) || floordiv(x * c1, c2).Match(ret) ||
         floordiv(y + x * c1, c2).Match(ret)) {
@@ -1120,8 +1141,12 @@ UnchangedOr<PrimExpr> RewriteSimplifier::Impl::Mutate_(const prim::FloorModObj* 
 
   if (IsIndexTypedExpr(op)) {
     // Be-aware of the division rules: we use floordiv/floormod here
-    TVM_TRY_REWRITE_IF(floormod(x * c1, c2), floormod(x * floormod(c1, c2), c2),
-                       c2.Eval()->value != 0);
+    // The reduced coefficient can be larger in magnitude than c1 when c1 or c2 is negative.
+    TVM_TRY_REWRITE_IF(
+        floormod(x * c1, c2), floormod(x * floormod(c1, c2), c2),
+        c2.Eval()->value != 0 &&
+            ((c1.Eval()->value > 0 && c2.Eval()->value > 0) ||
+             AffineFitsType(x.Eval(), floormod(c1.Eval()->value, c2.Eval()->value), 0)));
 
     TVM_TRY_REWRITE_IF(floormod(x * c1 + y, c2), floormod(x, floordiv(c2, c1)) * c1 + y,
                        c1.Eval()->value > 0 && c2.Eval()->value > 0 &&
@@ -1132,9 +1157,13 @@ UnchangedOr<PrimExpr> RewriteSimplifier::Impl::Mutate_(const prim::FloorModObj* 
                        c2.Eval()->value > 0 && c1.Eval()->value % c2.Eval()->value == 0);
 
     // (x + 5) % 2 -> (x + 1) %2,  (x + 3) % 3 => x
+    // A negative c1 raises the offset, so x + floormod(c1, c2) must still fit.
     TVM_TRY_REWRITE_IF(
         floormod(x + c1, c2), floormod(x + floormod(c1, c2), c2),
-        c2.Eval()->value > 0 && (c1.Eval()->value >= c2.Eval()->value || c1.Eval()->value < 0));
+        c2.Eval()->value > 0 &&
+            (c1.Eval()->value >= c2.Eval()->value ||
+             (c1.Eval()->value < 0 &&
+              AffineFitsType(x.Eval(), 1, floormod(c1.Eval()->value, c2.Eval()->value)))));
 
     TVM_TRY_REWRITE_IF(floormod(x + y * c1, c2), floormod(x + y * floormod(c1, c2), c2),
                        c2.Eval()->value > 0 && c1.Eval()->value % c2.Eval()->value == 0);

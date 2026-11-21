@@ -243,6 +243,21 @@ class RewriteSimplifier::Impl : public SimplifierBase {
     auto bound = val.as<int64_t>();
     return bound.has_value() && analyzer_->CanProveLess(x, *bound);
   }
+  // Whether x * scale + offset stays within the type of x for every value of x. A rule that
+  // introduces such a term must check it: the matched expression fitting does not imply it.
+  bool AffineFitsType(const PrimExpr& x, const ffi::BigInt& scale, const ffi::BigInt& offset) {
+    ConstIntBound bound = analyzer_->const_int_bound(x);
+    if (bound->min_value == ConstIntBound::kNegInf || bound->max_value == ConstIntBound::kPosInf) {
+      return false;
+    }
+    PrimType ty = x.ty();
+    bool is_signed = ty.MatchesCode(DLDataTypeCode::kDLInt);
+    ffi::BigInt type_min = is_signed ? -(ffi::BigInt(1) << (ty.bits() - 1)) : ffi::BigInt(0);
+    ffi::BigInt type_max = (ffi::BigInt(1) << (ty.bits() - is_signed)) - 1;
+    ffi::BigInt low = ffi::BigInt(bound->min_value) * scale + offset;
+    ffi::BigInt high = ffi::BigInt(bound->max_value) * scale + offset;
+    return std::min(low, high) >= type_min && std::max(low, high) <= type_max;
+  }
   // Whether x == val
   bool CanProveEqual(const PrimExpr& x, int64_t val) {
     // TODO(tqchen) refer back to super-analyzer.
