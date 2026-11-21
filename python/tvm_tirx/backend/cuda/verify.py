@@ -24,8 +24,13 @@ from tvm_tirx import ir
 
 KERNEL_ATTRS = "cuda.kernel_attrs"
 _REGISTER_BOUNDS = ("min_blocks_per_sm", "max_registers_per_thread")
+LAUNCH_DIMENSIONS = (
+    "cuda.launch_dimensions"  # (block.x, block.y, block.z, cluster.x, cluster.y, cluster.z)
+)
 REGISTER_FILE = 65536  # 32-bit registers per SM, sm_90 and sm_100 families
 MAX_REGISTERS_PER_THREAD = 255
+MAX_THREADS_PER_SM = 2048
+MAX_BLOCKS_PER_SM = 32
 
 
 class SetMaxNRegContractError(ValueError):
@@ -53,10 +58,14 @@ def entry_registers(
 
     The result times ``threads`` is the pool ``setmaxnreg`` redistributes. The
     warpgroups' targets must fit in it, or ``setmaxnreg.inc`` waits forever.
+
+    A ``min_blocks_per_sm`` that cannot be resident (``threads * min_blocks`` over
+    2048 threads per SM, or more than 32 blocks) pins nothing: ptxas ignores
+    ``.minnctapersm``, reports C7508 and drops ``setmaxnreg``. The result is None.
     """
     if max_registers_per_thread is not None:
         return int(max_registers_per_thread)
-    if min_blocks_per_sm is None:
+    if min_blocks_per_sm is None or not feasible_min_blocks(threads, min_blocks_per_sm):
         return None
     warps = -(-threads // 32)
     per_subpartition = -(-(warps * min_blocks_per_sm) // 4)
@@ -64,6 +73,24 @@ def entry_registers(
     if cap >= 256:
         return max(inc_targets) if inc_targets else MAX_REGISTERS_PER_THREAD
     return cap // 8 * 8
+
+
+def feasible_min_blocks(threads: int, min_blocks_per_sm: int) -> bool:
+    """Whether ``min_blocks_per_sm`` CTAs of ``threads`` threads can be resident on one SM."""
+    return (
+        1 <= min_blocks_per_sm <= MAX_BLOCKS_PER_SM
+        and threads * min_blocks_per_sm <= MAX_THREADS_PER_SM
+    )
+
+
+def _block_threads(func):
+    dims = func.attrs.get(LAUNCH_DIMENSIONS) if func.attrs is not None else None
+    if dims is None:
+        return None
+    try:
+        return int(dims[0]) * int(dims[1]) * int(dims[2])
+    except (TypeError, ValueError):  # symbolic block size
+        return None
 
 
 def _setmaxnreg_calls(func):
@@ -93,10 +120,22 @@ def verify_setmaxnreg_launch_contract(mod):
         if not calls:
             continue
         attrs = func.attrs.get(KERNEL_ATTRS) if func.attrs is not None else None
-        if attrs is not None and any(key in attrs for key in _REGISTER_BOUNDS):
-            continue
         loc = getattr(calls[0], "loc", None)
         where = f" (first use: {loc})" if loc is not None and str(loc) not in ("", "None") else ""
+        if attrs is not None and "max_registers_per_thread" in attrs:
+            continue
+        if attrs is not None and "min_blocks_per_sm" in attrs:
+            threads = _block_threads(func)
+            min_blocks = int(attrs["min_blocks_per_sm"])
+            if threads is None or feasible_min_blocks(threads, min_blocks):
+                continue
+            raise SetMaxNRegContractError(
+                f"kernel {gvar.name_hint!r} uses setmaxnreg{where} with "
+                f"min_blocks_per_sm={min_blocks} at {threads} threads per block, which cannot be "
+                f"resident ({threads * min_blocks} > {MAX_THREADS_PER_SM} threads or > "
+                f"{MAX_BLOCKS_PER_SM} blocks per SM). ptxas would ignore the bound (C7508) and "
+                "drop setmaxnreg. Use a min_blocks_per_sm that fits, e.g. 1."
+            )
         raise SetMaxNRegContractError(
             f"kernel {gvar.name_hint!r} uses setmaxnreg{where} but does not pin its entry register "
             "count, so ptxas would ignore it (C7508) and drop it from SASS. Add "
