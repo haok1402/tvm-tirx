@@ -43,8 +43,10 @@ from tvm_tirx.tirx.layout import S, TileLayout
 pytestmark = pytest.mark.cuda_min_compute(9)
 
 # The single m16n8k8 tile (1, 1, 1, 8) fails to lower on every arch
-# (KeyError 'm' in tile/patterns/common.py); kept at the default floor until fixed.
-_K8_SINGLE_TILE_BUG = pytest.mark.cuda_min_compute(10)
+# (KeyError 'm' in tile/patterns/common.py). Strict xfail below compute 10.0.
+_K8_SINGLE_TILE_BUG = pytest.mark.xfail(
+    not env.has_cuda_compute(10), strict=True, reason="m16n8k8 single tile: KeyError 'm'"
+)
 
 _PTX_TYPE = {"float16": "f16", "bfloat16": "bf16", "float32": "f32", "int8": "s8", "int32": "s32"}
 

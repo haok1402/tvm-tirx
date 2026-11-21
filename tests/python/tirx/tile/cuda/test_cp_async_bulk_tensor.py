@@ -2013,8 +2013,14 @@ def test_descriptor_cache_distinguishes_explicit_dtype_views():
         ({"g_layout": _plain_layout((4, 16), (4, 1))}, "byte strides"),
         ({"g_layout": _plain_layout((4, 16), (2**39, 1))}, "byte strides"),
         # Fails on every arch: the tile pattern rejects g_elem_offset as an unknown
-        # field before the alignment check. Kept at the default floor until fixed.
-        pytest.param({"g_elem_offset": 1}, "alignment", marks=pytest.mark.cuda_min_compute(10)),
+        # field before the alignment check.
+        pytest.param(
+            {"g_elem_offset": 1},
+            "alignment",
+            marks=pytest.mark.xfail(
+                not env.has_cuda_compute(10), strict=True, reason="g_elem_offset: unknown field"
+            ),
+        ),
         ({"box": (4, 0)}, "box"),
         ({"box": (4, 257)}, "box"),
         ({"box": (4, 7)}, "box"),
@@ -2516,8 +2522,17 @@ def test_descriptor_format_is_never_promoted():
 
 
 @pytest.mark.gpu
-@pytest.mark.parametrize("interleave,swizzle", [(1, 0), (1, 1), (1, 2), (1, 3), (2, 1)])
-@pytest.mark.cuda_min_compute(10)  # needs sm_100: interleaved tensor maps
+@pytest.mark.parametrize(
+    "interleave,swizzle",
+    [
+        (1, 0),
+        # The H200 driver rejects these interleaved tensor-map encodes.
+        pytest.param(1, 1, marks=pytest.mark.cuda_min_compute(10)),
+        pytest.param(1, 2, marks=pytest.mark.cuda_min_compute(10)),
+        pytest.param(1, 3, marks=pytest.mark.cuda_min_compute(10)),
+        (2, 1),
+    ],
+)
 def test_interleaved_channel_repeats_gpu(interleave, swizzle):
     channels = interleave * 8
     physical = (2, 5, 16, channels)

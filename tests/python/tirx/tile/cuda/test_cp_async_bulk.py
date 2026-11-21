@@ -99,8 +99,11 @@ def _count_s2c_ops(impl):
 # Dispatch assertion uses src_spec/dst_spec as given.
 # GPU correctness (all non-fail cases) uses src_spec as the layout for both CTAs.
 # The DSMEM bulk-copy pattern fails codegen on every arch ("Back optional
-# access"); the copying configs stay at the default floor until fixed.
-_DSMEM_PATTERN_BUG = pytest.mark.cuda_min_compute(10)
+# access"). Strict xfail below compute 10.0 so it turns red once fixed; on
+# compute 10.0+ the outcome is unchanged.
+_DSMEM_PATTERN_BUG = pytest.mark.xfail(
+    not env.has_cuda_compute(10), strict=True, reason="DSMEM pattern: Back optional access"
+)
 
 DSMEM_CONFIGS = [
     pytest.param(

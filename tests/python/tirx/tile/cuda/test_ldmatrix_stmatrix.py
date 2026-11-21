@@ -47,8 +47,10 @@ from tvm_tirx.tirx.layout import ComposeLayout, S, TileLayout
 pytestmark = pytest.mark.cuda_min_compute(9)
 
 # The x1 ldmatrix/stmatrix pattern fails to lower on every arch (KeyError 'm'
-# in tile/patterns/common.py); kept at the default floor until fixed.
-_X1_PATTERN_BUG = pytest.mark.cuda_min_compute(10)
+# in tile/patterns/common.py). Strict xfail below compute 10.0.
+_X1_PATTERN_BUG = pytest.mark.xfail(
+    not env.has_cuda_compute(10), strict=True, reason="x1 pattern lowering: KeyError 'm'"
+)
 
 
 def _compile_src(kernel):

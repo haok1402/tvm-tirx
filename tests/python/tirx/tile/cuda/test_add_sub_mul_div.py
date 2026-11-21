@@ -297,13 +297,17 @@ def test_binary_op_shared_subcta_scope(thread_scope, op_type):
 @pytest.mark.parametrize("thread_scope", ["cta", "warpgroup", "warp"])
 @pytest.mark.parametrize("rhs_kind", ["region", "broadcast", "const"])
 @pytest.mark.parametrize("op_type", ["add", "sub", "mul", "fdiv"])
-def test_binary_op_local_subcta_trivial(thread_scope, rhs_kind, op_type):
+def test_binary_op_local_subcta_trivial(request, thread_scope, rhs_kind, op_type):
     dtype = "float16"
     m, n = 4, 8
-    if rhs_kind == "broadcast" and op_type != "fdiv" and not env.has_cuda_compute(10):
+    if rhs_kind == "broadcast" and op_type != "fdiv":
         # Fails on every arch: view(dtype) of the width-1 broadcast operand needs a
-        # unit last-dim stride. Kept at the suite's default floor until fixed.
-        pytest.skip("requires a CUDA compute capability 10.0 device")
+        # unit last-dim stride. Strict xfail below compute 10.0.
+        request.applymarker(
+            pytest.mark.xfail(
+                not env.has_cuda_compute(10), strict=True, reason="view(dtype) of a broadcast"
+            )
+        )
     n_threads = 256 if thread_scope == "cta" else (128 if thread_scope == "warpgroup" else 32)
     # in this test, use warp3/warpgroup1 to test
     thr_str = 0 if thread_scope == "cta" else (128 if thread_scope == "warpgroup" else 32 * 3)

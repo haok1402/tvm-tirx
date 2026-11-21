@@ -204,9 +204,10 @@ def test_matrix_contract_rejections():
 @pytest.mark.gpu
 @pytest.mark.skipif(not env.has_cuda_compute(8), reason="CUDA compute required")
 @pytest.mark.parametrize("gapped", [False, True])
-# Fails on every arch (the host stride check rejects the input); kept at the
-# default floor until fixed.
-@pytest.mark.cuda_min_compute(10)
+# Fails on every arch: the host stride check rejects the input.
+@pytest.mark.xfail(
+    not env.has_cuda_compute(10), strict=True, reason="host stride check rejects the input"
+)
 def test_global_gpu(gapped):
     compiled = compile_kernel(global_kernel(gapped))
     ptx = compiled.mod.imports[0].inspect_source("ptx")
