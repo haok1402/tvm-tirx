@@ -148,6 +148,7 @@ Functions
    warp_in_warpgroup
    warp_sync
    warpgroup_id
+   broadcast_warpgroup_id
    warpgroup_sync
    wgmma_encode_matrix_descriptor
    wgmma_noop_barrier

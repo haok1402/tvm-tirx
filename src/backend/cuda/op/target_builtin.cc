@@ -202,6 +202,26 @@ void RegisterDeviceIntrinsics() {
         .set_attr(tvm::op_attr::kFixedReturnType, PrimType::Int(32))
         .expose();
   }
+  OpDef("tirx.cuda.warpgroup_id",
+        "The index of the calling thread's warpgroup (128 threads) in the CTA.\n\n"
+        "It is computed once at kernel entry from a warp shuffle of the warp index. To keep "
+        "arithmetic on it in uniform registers inside warp-specialized code (e.g. WGMMA shared-"
+        "memory descriptors), use broadcast_warpgroup_id there instead.");
+  // A cross-lane broadcast at its call site: opaque, so that no pass moves it into or out of
+  // the warp-converged code where the caller placed it.
+  RegisterDeviceIntrinsic(
+      OpDef("tirx.cuda.broadcast_warpgroup_id",
+            "The warpgroup index broadcast from lane 0 of the calling warp, at the call site.\n\n"
+            "Equals warpgroup_id(). nvcc knows the result is warp-uniform, so arithmetic on it "
+            "stays in uniform registers; e.g. WGMMA shared-memory descriptors derived from it need "
+            "no R2UR per instruction. Unlike warpgroup_id(), which is computed at kernel entry, "
+            "the broadcast runs where it is called, e.g. after setmaxnreg in a consumer branch.\n\n"
+            "Contract: call only from warp-converged code, where all 32 lanes of the warp are "
+            "active (it is a full-mask __shfl_sync). Calling it under a lane-divergent condition, "
+            "such as lane_id() == 0, is undefined behavior."),
+      CallEffectKind::kOpaque)
+      .set_attr(tvm::op_attr::kFixedReturnType, PrimType::Int(32))
+      .expose();
   RegisterDeviceIntrinsic(OpDef("tirx.cuda.any_sync"), CallEffectKind::kPure,
                           sig::arg<IntExpr>("mask"), sig::arg("pred"))
       .set_attr(tvm::op_attr::kFixedReturnType, PrimType::Int(32))
