@@ -44,9 +44,9 @@ backend config). ``(C75xx)`` remarks are printed without ``-v``.
 from __future__ import annotations
 
 import contextlib
+import contextvars
 import dataclasses
 import re
-import threading
 import warnings
 
 PERF_REMARK_MODES = ("warn", "error", "ignore")
@@ -174,13 +174,16 @@ def parse_compiler_log(log: str, arch: str | None = None) -> tuple[PerfRemark, .
 # -- collection across the C++ module factory --------------------------------------
 #
 # tvm_tirx.compile reaches compile_source through a C++ callback, which keeps only
-# an exception's message. A thread-local collector carries the structured remarks
-# (and the error-mode failure) back to the Python caller.
+# an exception's message. The callback runs synchronously on the caller's thread,
+# so a context variable carries the structured remarks (and the error-mode failure)
+# back to the Python caller. Collectors nest: each active one sees every remark.
 
-_LOCAL = threading.local()
+_COLLECTORS: contextvars.ContextVar[tuple] = contextvars.ContextVar(
+    "tvm_tirx_perf_remark_collectors", default=()
+)
 
 
-@dataclasses.dataclass
+@dataclasses.dataclass(eq=False)
 class RemarkCollector:
     """Remarks recorded by every CUDA device compile while the collector is active."""
 
@@ -190,20 +193,21 @@ class RemarkCollector:
 
 @contextlib.contextmanager
 def collect_perf_remarks():
-    """Collect the remarks of the device compiles run inside this ``with`` block."""
-    stack = getattr(_LOCAL, "stack", None)
-    if stack is None:
-        stack = _LOCAL.stack = []
+    """Collect the remarks of the device compiles run inside this ``with`` block.
+
+    Blocks may nest (``tvm_tirx.compile`` opens one of its own); every active
+    collector records every remark.
+    """
     collector = RemarkCollector()
-    stack.append(collector)
+    token = _COLLECTORS.set((*_COLLECTORS.get(), collector))
     try:
         yield collector
     finally:
-        stack.remove(collector)
+        _COLLECTORS.reset(token)
 
 
 def _active_collectors():
-    return getattr(_LOCAL, "stack", None) or ()
+    return _COLLECTORS.get()
 
 
 def report_perf_remarks(remarks, mode="warn", *, arch=None):
