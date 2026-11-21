@@ -16,6 +16,7 @@
 # under the License.
 import itertools
 
+import numpy as np
 import pytest
 
 import tvm_tirx
@@ -230,6 +231,36 @@ def test_lower_floordiv_overflow_checks(dtype, clamp, data):
     for value in data:
         expected = min(max(value, -10), 32758) if clamp else value
         assert compiled(value) == expected // 3
+
+
+@pytest.mark.skipif(not env.has_llvm(), reason="need llvm")
+def test_lower_floordiv_shift_under_scaled_binding():
+    """A shifted floordiv bound under a scale must not build an out-of-range literal.
+
+    x // 2 has no sign proof, so floordiv(t, 43) lowers to truncdiv(t + 43c, 43) - c with
+    c = 24970741; the constraint context then canonicalizes the binding of row, whose
+    distributed constant -256c does not fit int32.
+    """
+
+    @I.ir_module
+    class Before:
+        @T.function
+        def main(x: T.int32, out: T.Tensor((11,), "int32")):
+            T.func_attr({"target": T.target("llvm")})
+            for j in range(11):
+                tp = x // 2 + j * 66
+                if tp < 688:
+                    row = (tp // 43) * 256
+                    out[j] = row
+
+    After = tvm_tirx.tirx.transform.LowerIntrin()(Before)
+    compiled = tvm_tirx.compile(After, "llvm")
+    for x in [-200, -1, 0, 1, 131, 1000]:
+        out = tvm_tirx.runtime.tensor(np.full((11,), -1, dtype="int32"))
+        compiled(x, out)
+        tiles = [x // 2 + j * 66 for j in range(11)]
+        expected = [tile // 43 * 256 if tile < 688 else -1 for tile in tiles]
+        assert out.numpy().tolist() == expected
 
 
 if __name__ == "__main__":

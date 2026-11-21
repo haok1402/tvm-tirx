@@ -217,7 +217,13 @@ def test_floormod_simplify():
     ck = CanonicalChecker()
     flm = tvm_tirx.tirx.floormod
     x, y = tvm_tirx.tirx.Var("x", "int32"), tvm_tirx.tirx.Var("y", "int32")
-    ck.verify(flm(flm((x * 4) + y - 466036, 24528) - 24512, 16), flm((x * 4) + y + 12, 16))
+    # Reducing the offset -466036 to 12 needs x * 4 + y + 12 to fit int32, which only bounds show.
+    ck.verify(flm(flm((x * 4) + y - 466036, 24528) - 24512, 16), flm((x * 4) + y - 466036, 16))
+    bounded = CanonicalChecker()
+    bounded.constraints.append(tvm_tirx.sym.RangeConstraint(x, tvm_tirx.ir.Range(0, 2**20)))
+    bounded.constraints.append(tvm_tirx.sym.RangeConstraint(y, tvm_tirx.ir.Range(0, 4)))
+    bounded.analyzer.sync_constraint_context(bounded.constraints)
+    bounded.verify(flm(flm((x * 4) + y - 466036, 24528) - 24512, 16), flm((x * 4) + y + 12, 16))
     ck.verify(flm(flm((x * 4), 16), 8), flm(x, 2) * 4)
 
     ck.verify(flm(-x, 2), flm(x, -2) * -1)
@@ -268,15 +274,34 @@ def test_simplify_if_then_else():
         ),
         y,
     )
+    # Without bounds, x * 4 + y - 4 may overflow where x * 4 + y - 466036 does not.
     expected = tvm_tirx.tirx.if_then_else(
         tvm_tirx.tirx.LE(466036, (x * 4 + y)),
         tvm_tirx.tirx.if_then_else(
-            tvm_tirx.tirx.LE(24512, tmod(((x * 4) + y) - 4, 24528)), tmod(((x * 4) + y) - 4, 16), x
+            tvm_tirx.tirx.LE(24512, tmod(((x * 4) + y) - 466036, 24528)),
+            tmod(((x * 4) + y) - 466036, 16),
+            x,
         ),
         y,
     )
     ck.verify(res, expected)
     ck.verify(res2, expected)
+    bounded = CanonicalChecker()
+    bounded.constraints.append(tvm_tirx.sym.RangeConstraint(x, tvm_tirx.ir.Range(0, 2**20)))
+    bounded.constraints.append(tvm_tirx.sym.RangeConstraint(y, tvm_tirx.ir.Range(0, 4)))
+    bounded.analyzer.sync_constraint_context(bounded.constraints)
+    bounded.verify(
+        res,
+        tvm_tirx.tirx.if_then_else(
+            tvm_tirx.tirx.LE(466036, (x * 4 + y)),
+            tvm_tirx.tirx.if_then_else(
+                tvm_tirx.tirx.LE(24512, tmod(((x * 4) + y) - 4, 24528)),
+                tmod(((x * 4) + y) - 4, 16),
+                x,
+            ),
+            y,
+        ),
+    )
     # can only simplify if condition
     res = tvm_tirx.tirx.Select(
         tvm_tirx.tirx.all(x >= -1, y >= 0), tmod(x + y + 100, 3), tmod(x + 100, 3)
@@ -404,6 +429,79 @@ def test_simplify_normalize_min_value_expr():
         0 == -x + tvm_tirx.tirx.min_value(ty="int32"), x == tvm_tirx.tirx.min_value(ty="int32")
     )
     ck.verify(0 == x + tvm_tirx.tirx.min_value(ty="int32"), tirx.const(False, "bool"))
+
+
+def test_canonical_form_literals_exceeding_type():
+    """Canonical coefficients are unbounded, but a normal form needs literals of the type.
+
+    When distributing or folding constants yields a literal outside the type, the node is
+    simplified by the rewrite rules instead of failing in IntImm.
+    """
+    ck = CanonicalChecker()
+    x = tvm_tirx.tirx.Var("x", "int32")
+    y = tvm_tirx.tirx.Var("y", "int64")
+    tdiv = tvm_tirx.tirx.truncdiv
+
+    # Distributing the scale would need x * 4 - 2^32 and (x // 3) * 8 - 2^32.
+    ck.verify((x - 2**30) * 4, (x - 2**30) * 4)
+    ck.verify((x // 3 - 2**29) * 8, (x // 3 - 2**29) * 8)
+    ck.verify((y - T.int64(2**62)) * T.int64(4), (y - T.int64(2**62)) * T.int64(4))
+    # LowerIntrin shifts a dividend of unknown sign: floordiv(x, 43) = truncdiv(x + 43c, 43) - c.
+    # Scaling it by 256 would need the constant -256c = -6392509696.
+    shift = 24970741
+    shifted = (tdiv(x + 43 * shift, 43) - shift) * 256
+    ck.verify(shifted, shifted)
+    # Forms whose literals fit are still canonicalized.
+    ck.verify((x - 2**20) * 4, x * 4 - 2**22)
+    ck.verify((tdiv(x + 43 * shift, 43) - shift) * 8, tdiv(x + 43 * shift, 43) * 8 - 8 * shift)
+
+    # A binding is canonicalized, then rewritten, when it is ingested.
+    row = tvm_tirx.tirx.Var("row", "int32")
+    ck.constraints.append(tvm_tirx.sym.BindingConstraint(row, shifted))
+    ck.analyzer.sync_constraint_context(ck.constraints)
+    ck.verify(row + 1, (tdiv(x + 43 * shift, 43) + (-shift)) * 256 + 1)
+
+    # Pushing a cast into a sum checks the literals in the target type.
+    ck.constraints.append(
+        tvm_tirx.sym.RangeConstraint(y, tvm_tirx.ir.Range(T.int64(0), T.int64(10)))
+    )
+    ck.analyzer.sync_constraint_context(ck.constraints)
+    cast = tvm_tirx.tirx.Cast("int32", y + T.int64(2**40))
+    ck.verify(cast, cast)
+
+
+def test_canonical_product_constants_exceeding_type():
+    """Folding the literal factors of a product must not build an out-of-range literal.
+
+    Found by the differential fuzz: MulAndNormalize folded 1073741863 * -1048575 into one
+    int32 IntImm. The factors stay unfolded instead.
+    """
+    ck = CanonicalChecker()
+    x, y = tirx.Var("x", "int32"), tirx.Var("y", "int32")
+    c = lambda v: tvm_tirx.ir.IntImm("int32", v)  # noqa: E731
+    ck.verify(
+        tirx.Max(x + x, x - x) * c(1073741863) * (x * c(-1048575)),
+        tirx.Max(x, 0) * 2 * c(1073741863) * (x * c(-1048575)),
+    )
+    ck.verify(
+        tirx.truncdiv(
+            tirx.floordiv(y, 274) * c(268435455) * (x + c(268435457) + (c(-536870913) - x)), 184
+        ),
+        tirx.truncdiv(tirx.floordiv(y, 274) * c(268435455) * c(-268435456), 184),
+    )
+
+
+def test_proddiv_scales_exceeding_type():
+    """ProdDivSimplify folds each side's literal factors; an overflowing scale disables it.
+
+    With unfolded factors (see test_canonical_product_constants_exceeding_type), dividing out
+    y would need the constant 65536 * 65536.
+    """
+    ck = CanonicalChecker()
+    x, y = tirx.Var("x", "int32"), tirx.Var("y", "int32")
+    c = tvm_tirx.ir.IntImm("int32", 65536)
+    expr = tirx.floordiv((x * y) * c * (x * c), y)
+    ck.verify(expr, expr)
 
 
 def test_proddiv_simplify():
