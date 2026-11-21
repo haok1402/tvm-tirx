@@ -495,10 +495,6 @@ def test_tma_gather4():
 
 
 @pytest.mark.skipif(not env.has_cuda_compute(9), reason="Hopper required")
-# Fails on every arch (DSMEM pattern: "Back optional access" in codegen).
-@pytest.mark.xfail(
-    not env.has_cuda_compute(10), strict=True, reason="DSMEM pattern: Back optional access"
-)
 def test_dsmem_remote_addresses():
     sl = TileLayout(S[(3, 8) : (16, 1)])
 
