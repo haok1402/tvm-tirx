@@ -61,6 +61,18 @@ def test_unknown_register_is_unbounded():
     assert (bound.min_value, bound.max_value) == (-(2**31), 2**31 - 1)
 
 
+def test_launch_config_enforces_the_assumed_cluster_cap():
+    """cluster_cta_id is bounded by 16 CTAs per cluster, so a larger cluster is rejected."""
+    T.cuda.LaunchConfig(grid=64, block=128, cluster=16)
+    T.cuda.LaunchConfig(grid=(8, 8), block=128, cluster=(4, 4))
+    with pytest.raises(ValueError, match="at most 16 CTAs"):
+        T.cuda.LaunchConfig(grid=64, block=128, cluster=32)
+    with pytest.raises(ValueError, match="at most 16 CTAs"):
+        T.cuda.LaunchConfig(grid=(8, 8), block=128, cluster=(4, 8))
+    with pytest.raises(ValueError, match="at most 16 CTAs"):
+        T.cuda.LaunchConfig(grid=(8, 8), block=128, cluster=(2, 1), preferred_cluster=(8, 4))
+
+
 def _source(func):
     target = tvm_tirx.target.Target({"kind": "cuda", "arch": "sm_90a"})
     mod = tvm_tirx.compile(tvm_tirx.IRModule({"main": func}), target=target, pipeline="tirx")

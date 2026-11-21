@@ -22,6 +22,12 @@ from numbers import Integral, Real
 
 from .table import COMPOSITES, KERNEL_ATTR_FIELDS, LAUNCH_FIELDS
 
+# At most 16 CTAs per cluster: the non-portable maximum of sm_90 and sm_100 (8 is portable).
+# The analyzer bounds cluster indices with the same cap (kClusterLimit in
+# src/backend/cuda/op/target_builtin.cc); raise both together for an architecture with larger
+# clusters.
+MAX_CLUSTER_CTAS = 16
+
 
 def _integer(value):
     if isinstance(value, Integral):
@@ -161,6 +167,15 @@ class Config:
         static_threads = math.prod(_integer(extent) or 1 for extent in self.block)
         if static_threads > 1024:
             raise ValueError("block must contain at most 1024 threads")
+        for name in ("cluster", "preferred_cluster"):
+            shape = getattr(self, name)
+            if shape is not None:
+                ctas = math.prod(_integer(extent) or 1 for extent in shape)
+                if ctas > MAX_CLUSTER_CTAS:
+                    raise ValueError(
+                        f"{name} must contain at most {MAX_CLUSTER_CTAS} CTAs, the cluster size "
+                        "the compiler assumes for cluster indices"
+                    )
         if self.preferred_cluster is not None and self.cluster is None:
             raise ValueError("preferred_cluster requires an explicit cluster")
         shapes = {

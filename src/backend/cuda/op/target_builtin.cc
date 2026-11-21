@@ -80,6 +80,11 @@ void ValidateDeclTmem(const CallObj* call) {
 // floordiv(block_idx, c) lowers to truncdiv without a negative-operand fix-up.
 constexpr int64_t kGridLimit[3] = {(int64_t{1} << 31) - 1, 65535, 65535};
 constexpr int64_t kBlockLimit[3] = {1024, 1024, 64};
+// Per-architecture assumption: at most 16 CTAs per cluster, the non-portable maximum of
+// sm_90 and sm_100 (8 is portable). FConstIntBound sees only the call, not the target, so the
+// cap cannot come from it; LaunchConfig enforces the same cap (MAX_CLUSTER_CTAS in
+// backend/cuda/launch/_impl.py) so that a TIRx launch never exceeds this bound. Raise both
+// together for an architecture with larger clusters.
 constexpr int64_t kClusterLimit = 16;
 
 ffi::Optional<sym::ConstIntBound> CudaRegisterBound(const std::string& name) {
