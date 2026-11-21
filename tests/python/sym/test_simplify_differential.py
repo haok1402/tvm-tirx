@@ -78,7 +78,11 @@ def _evaluate(expr, env, wrap):
     return value
 
 
-def _expressions(seed, count):
+def _expressions(seed, count, limit=2**31):
+    """Random expressions with the points where they are evaluated.
+
+    Points draw x from [-limit, limit) half of the time and y a quarter of the time, else small.
+    """
     rng = random.Random(seed)
     x, y = tirx.Var("x", "int32"), tirx.Var("y", "int32")
 
@@ -117,10 +121,12 @@ def _expressions(seed, count):
         expr = generate(rng.randint(2, 4))
         points = [
             {
-                "x": rng.randint(INT32_MIN, INT32_MAX)
+                "x": rng.randint(-limit, limit - 1)
                 if rng.random() < 0.5
                 else rng.randint(-5000, 5000),
-                "y": rng.randint(-5000, 5000),
+                "y": rng.randint(-limit, limit - 1)
+                if limit < 2**31 and rng.random() < 0.25
+                else rng.randint(-5000, 5000),
             }
             for _ in range(24)
         ]
@@ -142,6 +148,32 @@ def test_simplified_value_matches_exact_value(method):
             simplified = getattr(Analyzer(), method)(expr)
         except ValueError:
             # A literal that cannot be represented is reported, not miscompiled.
+            continue
+        for point, expected in cases:
+            try:
+                actual = _evaluate(simplified, point, wrap=True)
+            except ZeroDivisionError:
+                actual = "division by zero"
+            if actual != expected:
+                mismatches.append(f"{expr} -> {simplified} at {point}: {actual} != {expected}")
+                break
+    assert not mismatches, "\n".join(mismatches[:10])
+
+
+@pytest.mark.parametrize("method", ["rewrite_simplify", "canonical_simplify", "simplify"])
+def test_index_domain_values_are_exact(method):
+    """Within the int32 index domain |v| < 2^30, every simplified value is exact.
+
+    Rewrites may form a sum or difference of two terms that the input never computed, e.g.
+    min(c, x) - x -> min(c - x, 0); such a term can overflow only for values of 2^30 or more.
+    An in-bounds index of a tensor with at most 2^30 elements is in this domain; larger tensors
+    are indexed in int64 (LowerTensorLayouts).
+    """
+    mismatches = []
+    for expr, cases in _expressions(seed=20261122, count=1500, limit=2**30):
+        try:
+            simplified = getattr(Analyzer(), method)(expr)
+        except ValueError:
             continue
         for point, expected in cases:
             try:
