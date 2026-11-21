@@ -18,9 +18,21 @@
 
 Warp-specialized kernels order warpgroups with named barriers: two consumer
 warpgroups ping-pong their MMA and epilogue phases, a producer signals a
-consumer, and so on. Barrier 0 is what ``T.cuda.cta_sync()`` (``__syncthreads``)
-uses, so it is reserved. :class:`NamedBarriers` hands out ids 1..15 at trace time
-so independent helpers in one kernel never collide.
+consumer, and so on. There are 16 hardware barriers per CTA.
+
+**Ids are a kernel-wide resource.** Create **one** :class:`NamedBarriers` per
+kernel, like the kernel's ``SMEMPool``, and pass it to every helper that needs
+barriers, so that no two of them get the same id. Barrier 0 is
+``T.cuda.cta_sync()`` (``__syncthreads``) and is always reserved.
+
+Code that names ids directly, ``T.cuda.warpgroup_sync(id)`` (``bar.sync id, 128``)
+or raw ``T.ptx["bar.sync"]``, must :meth:`NamedBarriers.reserve` those ids in the
+kernel's allocator. Known users:
+
+* ``ClusterLaunchControlScheduler`` (sm_100 CLC worker,
+  ``lang/tile_scheduler.py``) uses ``warpgroup_sync(wg_id + 1)``, i.e. ids
+  ``1 .. num_warpgroups``;
+* TIRx-kernels kernels that pick ids by hand (e.g. ``wg + 10``).
 """
 
 from __future__ import annotations
@@ -61,16 +73,43 @@ class NamedBarrier:
 
 
 class NamedBarriers:
-    """Trace-time allocator of barrier ids 1..15 for one kernel."""
+    """Trace-time allocator of barrier ids 1..15 for **one kernel**.
 
-    def __init__(self, first_id: int = 1):
-        if first_id in RESERVED_BARRIER_IDS or first_id < 0:
-            raise ValueError(f"first_id {first_id} is reserved")
-        self._next = first_id
+    ``reserved`` (or later :meth:`reserve` calls) marks ids that code in the same
+    kernel names directly, e.g. through ``T.cuda.warpgroup_sync``. :meth:`alloc`
+    never returns a reserved id, and :meth:`reserve` refuses an id already
+    handed out.
+    """
+
+    def __init__(self, reserved=()):
+        self._used = set(RESERVED_BARRIER_IDS)
+        self._allocated = set()
+        self.reserve(*reserved)
+
+    def reserve(self, *ids: int):
+        """Mark ``ids`` as taken by code that uses them directly."""
+        for barrier_id in ids:
+            if not 0 < barrier_id < NUM_HARDWARE_BARRIERS:
+                raise ValueError(
+                    f"named barrier id {barrier_id} is outside 1..{NUM_HARDWARE_BARRIERS - 1}"
+                )
+            if barrier_id in self._allocated:
+                raise ValueError(
+                    f"named barrier id {barrier_id} was already allocated in this kernel"
+                )
+            self._used.add(barrier_id)
+        return self
 
     def alloc(self, num_threads: int) -> NamedBarrier:
-        if self._next >= NUM_HARDWARE_BARRIERS:
-            raise ValueError(f"out of named barriers (ids 1..{NUM_HARDWARE_BARRIERS - 1})")
-        barrier = NamedBarrier(self._next, num_threads)
-        self._next += 1
-        return barrier
+        """A barrier with the lowest free id, for ``num_threads`` threads."""
+        for barrier_id in range(1, NUM_HARDWARE_BARRIERS):
+            if barrier_id not in self._used:
+                self._used.add(barrier_id)
+                self._allocated.add(barrier_id)
+                return NamedBarrier(barrier_id, num_threads)
+        raise ValueError(f"out of named barriers (ids 1..{NUM_HARDWARE_BARRIERS - 1} all taken)")
+
+    @property
+    def free(self) -> int:
+        """How many ids are still available."""
+        return NUM_HARDWARE_BARRIERS - len(self._used)
