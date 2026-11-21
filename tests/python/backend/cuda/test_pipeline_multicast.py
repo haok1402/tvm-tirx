@@ -74,6 +74,97 @@ def test_arrive_multicast_releases_every_cta(cluster):
     assert done.tolist() == [rounds] * cluster
 
 
+_TMA_MC = (
+    "cp.async.bulk.tensor.2d.shared::cluster.global.mbarrier::complete_tx::bytes.multicast::cluster"
+)
+
+
+@requires_clusters
+@pytest.mark.parametrize("stages", [2, 3])
+@pytest.mark.parametrize("skew", [False, True])
+def test_multicast_ring_under_phase_wrap(stages, skew):
+    """A TMA-multicast ring with multicast release, wrapping each stage's phase hundreds of times.
+
+    2-CTA cluster. Per iteration, each CTA's producer multicasts one 1 KB row into the
+    stage of *both* CTAs; 128 consumers per CTA sum both rows, then release the stage in
+    both CTAs with ``empty.arrive_multicast(stage, ranks=[0, 1])`` (empty count 2). A
+    producer can only overwrite a stage once both CTAs' consumers have released it, so
+    the sums are exact. ``skew`` makes CTA 1's consumers sleep every 5th iteration, so
+    the CTAs drift apart and the cross-CTA release is what holds them together.
+    (Reduced from the review's stress kernel: 4096 iterations x 3 launches, all exact.)
+    """
+    import torch
+
+    nk, width = 512, 256
+
+    # fmt: off
+    @T.function
+    def main(X: T.Tensor((nk * 2, width), "float32", align=16),
+             out: T.Tensor((2, 128, 4), "float32")):
+        X_map: T.let[T.handle("tensormap")] = T.stack_alloca("tensormap", 1)
+        T.call_packed("runtime.cuTensorMapEncodeTiled", X_map, "float32", 2, X.data, width, nk * 2,
+                      width * 4, width, 1, 1, 1, 0, 0, 0, 0)
+        T.device_entry(launch=T.cuda.LaunchConfig(grid=2, block=256, cluster=2))
+        tx = T.cuda.thread_idx("x")
+        rank = T.cuda.mov_sreg(32, "cluster_ctarank")
+        pool = SMEMPool()
+        full = MBarrier(pool, stages)
+        empty = MBarrier(pool, stages)
+        pool.commit()
+        buf = T.alloc_shared((stages * 2 * width,), "float32", align=1024)
+        acc = T.alloc_local((4,), "float32")
+        if tx == 0:
+            full.init(1)
+            empty.init(2)
+        T.ptx.fence.mbarrier_init.release.cluster()
+        T.cuda.cluster_sync()
+        if tx == 0:
+            for kt in T.serial(nk):
+                stage = T.meta_var(kt % stages)
+                empty.wait(stage, ((kt // stages) & 1) ^ 1)
+                T.ptx.mbarrier.arrive.expect_tx.shared.b64(full.ptr_to([stage]),
+                                                           T.uint32(2 * width * 4))
+                T.ptx[_TMA_MC](buf.ptr_to([stage * 2 * width + rank * width]),
+                               T.address_of(X_map), 0, kt * 2 + rank, full.ptr_to([stage]),
+                               T.uint16(3))
+        elif tx >= 128:
+            c = tx - 128
+            for i in T.unroll(4):
+                acc[i] = T.float32(0)
+            for kt in T.serial(nk):
+                stage = T.meta_var(kt % stages)
+                full.wait(stage, (kt // stages) & 1)
+                if T.constexpr(skew):
+                    if rank == 1:
+                        if kt % 5 == 0:
+                            T.cuda.nano_sleep(T.uint64(3000))
+                for i in T.unroll(4):
+                    row = stage * 2 * width + (i // 2) * width
+                    acc[i] = acc[i] + buf[row + c * 2 + (i % 2)]
+                T.ptx["bar.sync"](T.uint32(1), T.uint32(128))
+                if c == 0:
+                    empty.arrive_multicast(stage, ranks=[0, 1])
+            for i in T.unroll(4):
+                out[rank, c, i] = acc[i]
+        T.cuda.cluster_sync()
+    # fmt: on
+
+    mod = _compile(main)
+    torch.manual_seed(0)
+    X = torch.randint(-8, 8, (nk * 2, width), device="cuda").float()  # sums stay exact in fp32
+    out = torch.zeros(2, 128, 4, device="cuda")
+    rows = X.view(nk, 2, width)
+    ref = torch.stack(
+        [torch.stack([rows[:, j // 2, c * 2 + j % 2].sum() for j in range(4)]) for c in range(128)]
+    )
+    for _ in range(2):
+        out.zero_()
+        mod(X, out)
+        torch.cuda.synchronize()
+        assert torch.equal(out[0], ref)
+        assert torch.equal(out[1], ref)
+
+
 def test_arrive_multicast_rejects_empty_ranks():
     with pytest.raises(ValueError, match="at least one"):
 
