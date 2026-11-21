@@ -21,6 +21,8 @@
 # A family, token combination or target arch absent here is unchecked.
 
 ARCHS = ("sm_80", "sm_89", "sm_90", "sm_90a")
+# The toolchain the data was measured with; under another one the check is skipped.
+TOOLCHAIN = {"nvrtc": (13, 2), "cudart_headers": 13020}
 
 # fmt: off
 FLOORS = {

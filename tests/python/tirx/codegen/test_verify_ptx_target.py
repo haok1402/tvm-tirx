@@ -31,6 +31,12 @@ def _target(arch):
     return tvm_tirx.target.Target({"kind": "cuda", "arch": arch})
 
 
+@pytest.fixture(autouse=True)
+def measured_toolchain(monkeypatch):
+    """The checks below are about the floor data, not about this host's NVRTC version."""
+    monkeypatch.setattr(floors, "toolchain_matches", lambda: True)
+
+
 @pytest.fixture
 def no_nvrtc(monkeypatch):
     """Fail if device code reaches the CUDA compiler: the rejection must come first."""
@@ -181,3 +187,49 @@ def test_call_site_chains_name_the_kernel_line():
     assert _location(Node(chain)) == "helper.py:10:1 <- mid.py:20:1 <- k.py:30:1"
     assert _location(Node(line("k.py", 7))) == "k.py:7:1"
     assert _location(Node(UnknownLoc())) is None
+
+
+def test_another_toolchain_disables_the_check(monkeypatch):
+    """Floors measured with one NVRTC / header version must not reject under another."""
+    from tvm_tirx.backend.cuda.ptx.floors_generated import TOOLCHAIN
+
+    monkeypatch.undo()  # drop the autouse pin
+    other = {**TOOLCHAIN, "nvrtc": (TOOLCHAIN["nvrtc"][0], TOOLCHAIN["nvrtc"][1] + 1)}
+    monkeypatch.setattr(floors, "current_toolchain", lambda: other)
+    floors.toolchain_matches.cache_clear()
+    try:
+        entry = TABLE["tcgen05_fence"]
+        with pytest.warns(UserWarning, match="VerifyPTXTarget is disabled"):
+            assert floors.rejection(entry, next(iter(variants(entry))), "sm_90a") is None
+    finally:
+        floors.toolchain_matches.cache_clear()
+
+
+@pytest.mark.parametrize(
+    "target_arch, config_arch, make, rejected",
+    [
+        # The backend config's arch is the one compiled for, so it is the one checked.
+        ("sm_90", "sm_90a", _setmaxnreg_kernel, False),
+        ("sm_90a", "sm_90", _setmaxnreg_kernel, True),
+        ("sm_90a", "sm_100a", _tcgen05_kernel, False),
+        ("sm_100a", "sm_90a", _tcgen05_kernel, True),
+    ],
+)
+def test_backend_config_arch_overrides_the_target(
+    target_arch, config_arch, make, rejected, no_nvrtc
+):
+    mod = tvm_tirx.IRModule({"main": make()})
+    backend = {"cuda": {"arch": config_arch}}
+    target = tvm_tirx.target.Target(
+        {"kind": "cuda", "arch": target_arch, "backend_config": backend}
+    )
+    if rejected:
+        with pytest.raises(PTXTargetError, match=f"the target is {config_arch}"):
+            tvm_tirx.compile(mod, target=target, pipeline="tirx")
+    else:
+        # Past the check: either source-only compilation finishes (CPU-only hosts) or the
+        # stubbed NVRTC is reached.
+        try:
+            tvm_tirx.compile(mod, target=target, pipeline="tirx")
+        except AssertionError as error:
+            assert "reached NVRTC" in str(error)

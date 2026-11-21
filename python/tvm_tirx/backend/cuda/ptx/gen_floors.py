@@ -24,7 +24,7 @@ certification test assembles every variant there). A family with ``cert_arch`` o
 is left unchecked (its per-variant floors below sm_90 are not measured). Only the families whose
 ``cert_arch`` is newer than sm_90 *and* one NVRTC can target are measured
 (:func:`measured_families`), at the :data:`CHECKED_ARCHS`. A family certified at sm_107* (NVRTC
-13.4 cannot target it) would have no witness, so it stays unchecked.
+13.2 cannot target it) would have no witness, so it stays unchecked.
 
 For each measured family and every legal modifier combination (``table.variants``), one
 representative rendering is compiled through the production compile path
@@ -56,7 +56,7 @@ import time
 # Targets the check covers; the order is the bit order of the generated masks. Other targets
 # (sm_86/87/88, sm_100 and later) are unchecked.
 CHECKED_ARCHS = ("sm_80", "sm_89", "sm_90", "sm_90a")
-# Archs NVRTC 13.4 accepts as cubin targets, i.e. usable as a witness (sm_107* is not among them).
+# Archs NVRTC 13.2 accepts as cubin targets, i.e. usable as a witness (sm_107* is not among them).
 NVRTC_ARCHS = frozenset(
     ("sm_75", "sm_80", "sm_86", "sm_87", "sm_88", "sm_89", "sm_90", "sm_90a", "sm_100", "sm_100a",
      "sm_100f", "sm_103", "sm_103a", "sm_103f", "sm_110", "sm_110a", "sm_110f", "sm_120", "sm_120a",
@@ -361,7 +361,7 @@ def _literal(value):
     return repr(value).replace("'", '"')
 
 
-def write(result, path):
+def write(result, path, toolchain=None):
     license_header = []
     with open(__file__, encoding="utf-8") as f:
         for line in f:  # this module's own ASF header
@@ -377,6 +377,8 @@ def write(result, path):
         "# A family, token combination or target arch absent here is unchecked.",
         "",
         f"ARCHS = {_literal(tuple(CHECKED_ARCHS))}",
+        "# The toolchain the data was measured with; under another one the check is skipped.",
+        f"TOOLCHAIN = {_literal(toolchain)}",
         "",
         "# fmt: off",
         "FLOORS = {",
@@ -403,8 +405,13 @@ def main(argv=None):
     args = parser.parse_args(argv)
     out = args.out or os.path.join(os.path.dirname(__file__), "floors_generated.py")
     families = args.families.split(",") if args.families else None
+    from tvm_tirx.backend.cuda.ptx.toolchain import current_toolchain  # pylint: disable=import-outside-toplevel
+
+    toolchain = current_toolchain()
+    if toolchain is None or toolchain["cudart_headers"] is None:
+        raise SystemExit("gen_floors: cannot determine the NVRTC / CUDA header versions")
     result = generate(families, jobs=args.jobs, cache=args.cache)
-    write(result, out)
+    write(result, out, toolchain)
     print(f"gen_floors: wrote {len(result)} families to {out}", file=sys.stderr)
 
 
