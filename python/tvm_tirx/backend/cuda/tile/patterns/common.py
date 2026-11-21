@@ -237,6 +237,15 @@ class Context:
         return SeqStmt([*self.bindings, body])
 
 
+def _storage(physical):
+    """The storage ("m") coordinate of a physical layout point.
+
+    A layout whose storage extent is 1 has no ``m`` axis at all, e.g. ldmatrix x1 or a single
+    m16n8k8 tile, where each thread owns exactly one element. Its storage offset is then 0.
+    """
+    return physical.get("m", IntImm("int32", 0))
+
+
 class Region:
     """An operand's group prefix, repeat axes, and its own fixed atom suffix."""
 
@@ -334,7 +343,7 @@ class Region:
                 physical.get(axis, 0) == owner,
                 f"{self.name}: incorrect {axis} owner; expected {owner}",
             )
-        return physical["m"]
+        return _storage(physical)
 
     def aligned(self, atom, byte_alignment):
         alignment = int(self.ty.data_alignment)
@@ -382,7 +391,7 @@ class Region:
             self.ctx.bindings.append(
                 Bind(self.raw, T.decl_tensor(self.tensor.data, ty_args=[self.raw.ty]))
             )
-        return self.raw[self.physical(atom)["m"]]
+        return self.raw[_storage(self.physical(atom))]
 
     def pointer(self, atom):
         return self.tensor.ptr_to(self.indices(atom))
