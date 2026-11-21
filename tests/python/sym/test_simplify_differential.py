@@ -138,11 +138,9 @@ def _expressions(seed, count):
 def test_simplified_value_matches_exact_value(method):
     mismatches = []
     for expr, cases in _expressions(seed=20261121, count=1500):
-        try:
-            simplified = getattr(Analyzer(), method)(expr)
-        except ValueError:
-            # A literal that cannot be represented is reported, not miscompiled.
-            continue
+        # A canonical form whose literals overflow falls back to the rewrite rules, so no
+        # simplifier raises on these inputs.
+        simplified = getattr(Analyzer(), method)(expr)
         for point, expected in cases:
             try:
                 actual = _evaluate(simplified, point, wrap=True)
