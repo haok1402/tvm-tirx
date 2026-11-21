@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import functools
 import sys
+import threading
 from collections.abc import Callable
 from typing import Any
 
@@ -600,22 +601,24 @@ def bind_at_call_site(func: Callable, name: str) -> Callable:
         )
 
         var = bind_(value, name=name)
-        _LAST_CALL_SITE_BINDING[0] = var
+        _CALL_SITE_BINDING.last = var
         return var
 
     return wrapped
 
 
-# The variable most recently bound by bind_at_call_site. A parser binding of exactly this
-# object, e.g. ``x: T.let[T.int32] = T.cuda.__shfl_sync(...)``, names it instead of binding it
-# again, so printed IR round-trips without an extra variable.
-_LAST_CALL_SITE_BINDING: list = [None]
+# The variable most recently bound by bind_at_call_site, in ``.last``. A parser binding of
+# exactly this object, e.g. ``x: T.let[T.int32] = T.cuda.__shfl_sync(...)``, names it instead of
+# binding it again, so printed IR round-trips without an extra variable. Per thread, like the
+# IR builder itself: kernels built concurrently must not see each other's record.
+_CALL_SITE_BINDING = threading.local()
 
 
 def take_call_site_binding(value) -> bool:
     """Whether value is the variable bind_at_call_site just bound; consumes the record."""
-    if _LAST_CALL_SITE_BINDING[0] is not None and value is _LAST_CALL_SITE_BINDING[0]:
-        _LAST_CALL_SITE_BINDING[0] = None
+    last = getattr(_CALL_SITE_BINDING, "last", None)
+    if last is not None and value is last:
+        _CALL_SITE_BINDING.last = None
         return True
     return False
 

@@ -23,6 +23,8 @@ read in later expressions.
 """
 
 import re
+import threading
+from concurrent.futures import ThreadPoolExecutor
 
 import numpy as np
 import pytest
@@ -162,6 +164,39 @@ def test_collective_outside_kernel_body_raises(construct):
     # would be re-emitted at each use.
     with pytest.raises(RuntimeError, match="inside the kernel body"):
         construct()
+
+
+def test_call_site_record_is_per_thread():
+    # The record that lets `x: T.let[...] = collective(...)` reuse the call-site binding must
+    # not be visible to (or consumed by) a kernel being built on another thread.
+    from tvm_tirx.tirx.script.ir_builder import op as _op
+
+    bound = object()
+    _op._CALL_SITE_BINDING.last = bound
+    seen = []
+    other = threading.Thread(target=lambda: seen.append(_op.take_call_site_binding(bound)))
+    other.start()
+    other.join()
+    assert seen == [False]
+    assert _op.take_call_site_binding(bound)
+    assert not _op.take_call_site_binding(bound)
+
+
+def test_concurrent_builds_bind_once():
+    def build(_):
+        @T.function
+        def main(a: T.Tensor((32,), "int32")):
+            T.device_entry(launch=T.cuda.LaunchConfig(grid=1, block=32))
+            tx = T.cuda.thread_idx("x")
+            x: T.let[T.int32] = T.cuda.__shfl_sync(T.uint32(0xFFFFFFFF), a[tx], 0, 32)
+            a[tx] = x + 1
+
+        return main.script()
+
+    with ThreadPoolExecutor(8) as pool:
+        scripts = list(pool.map(build, range(32)))
+    assert len(set(scripts)) == 1, scripts[0]
+    assert scripts[0].count("__shfl_sync") == 1, scripts[0]
 
 
 @pytest.mark.gpu
