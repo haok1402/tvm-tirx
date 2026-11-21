@@ -37,6 +37,20 @@ parts kernels get wrong:
 
 All helpers are plain Python that emit TIR while a ``@T.function`` body is being
 traced. Call them from inside the body.
+
+**Keep descriptor arithmetic uniform.** WGMMA reads its shared-memory descriptors
+from uniform registers. A per-warpgroup offset derived from ``T.cuda.thread_idx``,
+e.g. ``wg = tx // 128``, is per-thread as far as nvcc can tell, so every descriptor
+update runs in vector registers and each ``wgmma`` needs an ``R2UR``. Derive it
+from ``T.cuda.broadcast_warpgroup_id()``, called in the warp-specialized consumer
+code, e.g. after ``setmaxnreg``. That is a lane-0 broadcast at the call site, and
+it must only be called from warp-converged code. ``T.cuda.warpgroup_id()`` is
+uniform too, but it is computed at kernel entry. On H200, fp8 blockscale GEMM (B2)
+against DeepGEMM, gated geomean:
+
+* ``tx // 128``: 0.980
+* ``T.cuda.warpgroup_id()``: 0.995
+* ``T.cuda.broadcast_warpgroup_id()`` or an explicit ``shfl.sync.idx`` broadcast: 1.000
 """
 
 from __future__ import annotations
@@ -166,7 +180,9 @@ def smem_descriptor(ptr, *, major="K", swizzle=128, mn_atom_stride_bytes=None):
     K extents that span several swizzle atoms.
 
     ``ptr`` is the tile's first element in shared memory, aligned to the swizzle
-    atom (1024 B for 128B swizzle).
+    atom (1024 B for 128B swizzle). Derive a per-warpgroup offset in ``ptr`` from
+    ``T.cuda.broadcast_warpgroup_id()``, not ``thread_idx``, so that the descriptor
+    stays in uniform registers (see the module notes).
 
     * ``major="K"``: rows are M (or N), each row holds ``swizzle`` bytes of K, and
       8-row groups are ``8 * swizzle`` bytes apart (stride byte offset). This is
