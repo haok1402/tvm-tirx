@@ -18,6 +18,7 @@
 
 from __future__ import annotations
 
+import functools
 import sys
 from collections.abc import Callable
 from typing import Any
@@ -560,6 +561,35 @@ cpu_parallel_barrier = _auto_emit_void_call(_tir_op.cpu_parallel_barrier)
 
 
 kernel_replace_point = _auto_emit_void_call(_tir_op.kernel_replace_point)
+
+
+def bind_at_call_site(func: Callable, name: str) -> Callable:
+    """Bind the result of a warp-collective call to a fresh variable where it is called.
+
+    A TIRx expression is a tree, so an unbound call is evaluated wherever its value is used.
+    A Python value used twice emits the call twice, and a use in the second operand of
+    ``T.Or`` / ``T.And`` or in an arm of ``T.Select`` / ``T.if_then_else`` runs it on only
+    the lanes that reach that operand. For a collective whose lanes must all participate
+    (``__shfl_sync`` with a full mask, ...), that is undefined behavior; on H200 the warp hangs.
+
+    Under an active IR builder the wrapped constructor therefore emits ``Bind(v, call)`` at the
+    call site, in statement order, and returns ``v``: the collective runs once, there, and
+    later uses read ``v``. To run a collective conditionally, call it inside an ``if`` statement.
+    Outside a builder the call is returned unchanged.
+    """
+
+    @functools.wraps(func)
+    def wrapped(*args, **kwargs):
+        value = func(*args, **kwargs)
+        if not IRBuilder.is_in_scope() or not isinstance(value, Call):
+            return value
+        from tvm_tirx.tirx.script.ir_builder.parser_protocol import (  # pylint: disable=import-outside-toplevel
+            bind_,
+        )
+
+        return bind_(value, name=name)
+
+    return wrapped
 
 
 gpu_warp_shuffle = _auto_emit_void_call(_tir_op.gpu_warp_shuffle)

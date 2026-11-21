@@ -218,7 +218,9 @@ void RegisterDeviceIntrinsics() {
             "the broadcast runs where it is called, e.g. after setmaxnreg in a consumer branch.\n\n"
             "Contract: call only from warp-converged code, where all 32 lanes of the warp are "
             "active (it is a full-mask __shfl_sync). Calling it under a lane-divergent condition, "
-            "such as lane_id() == 0, is undefined behavior."),
+            "such as lane_id() == 0, is undefined behavior. The script constructor binds the "
+            "result to a variable at the call site, so the shuffle runs once, there, and later "
+            "uses of the value (e.g. in a short-circuit T.Or operand) read the variable."),
       CallEffectKind::kOpaque)
       .set_attr(tvm::op_attr::kFixedReturnType, PrimType::Int(32))
       .expose();

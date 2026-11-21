@@ -22,6 +22,7 @@ from tvm_tirx import ir as _ir
 from tvm_tirx.backend.cuda import op as _cuda_op
 from tvm_tirx.ir._expose_api import _init_exposed_op_api, _make_op_api
 from tvm_tirx.script.ir_builder.base import auto_emit_void_call as _auto_emit_void_call
+from tvm_tirx.tirx.script.ir_builder.op import bind_at_call_site as _bind_at_call_site
 
 from . import layout as layout
 from .axis import Axis as Axis
@@ -243,3 +244,6 @@ class PTXNamespace(_PTXNamespace):
 
 
 _init_exposed_op_api("tirx.cuda", __name__, wrapper=_auto_emit_void_call)
+
+# The full-mask broadcast runs once, where it is called; see bind_at_call_site.
+broadcast_warpgroup_id = _bind_at_call_site(broadcast_warpgroup_id, "warpgroup_id")  # noqa: F821
