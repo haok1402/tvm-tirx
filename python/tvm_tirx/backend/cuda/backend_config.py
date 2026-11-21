@@ -32,6 +32,7 @@ class BackendConfig(TypedDict, total=False):
     nvcc: list[str]
     nvrtc: list[str]
     ptxas: list[str]
+    perf_remarks: Literal["warn", "error", "ignore"]
 
 
 # Only arguments that conflict with TVM's architecture, artifact, or tool routing
@@ -90,6 +91,8 @@ def validate_backend_config(config):
         raise ValueError("CUDA backend_config.compiler must be 'nvcc' or 'nvrtc'")
     if "target_format" in result and result["target_format"] not in ("ptx", "cubin", "fatbin"):
         raise ValueError("CUDA backend_config.target_format must be 'ptx', 'cubin', or 'fatbin'")
+    if "perf_remarks" in result and result["perf_remarks"] not in ("warn", "error", "ignore"):
+        raise ValueError("CUDA backend_config.perf_remarks must be 'warn', 'error', or 'ignore'")
     if result.get("compiler") == "nvrtc" and result.get("target_format") == "fatbin":
         raise ValueError("NVRTC cannot produce fatbin; use compiler='nvcc'")
     return result

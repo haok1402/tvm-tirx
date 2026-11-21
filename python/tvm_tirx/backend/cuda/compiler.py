@@ -20,21 +20,30 @@ from typing import NamedTuple
 
 from ..config import copy_backend_config
 from .backend_config import compiler_options, resolve_backend_config
+from .perf_remarks import PerfRemark, parse_compiler_log, report_perf_remarks
 
 
 class CompilationResult(NamedTuple):
-    """Device artifact and the effective settings used to produce it."""
+    """Device artifact, the effective settings used to produce it, and the compile log.
+
+    ``remarks`` are the performance remarks parsed from ``log`` (see
+    :mod:`tvm_tirx.backend.cuda.perf_remarks`).
+    """
 
     binary: bytes
     target_format: str
     config: dict
+    log: str = ""
+    remarks: tuple[PerfRemark, ...] = ()
 
 
 def compile_source(source: str, backend_config=None, *, target=None) -> CompilationResult:
     """Compile source with per-backend overrides and optional Target/tag defaults.
 
     When target is omitted, use the configuration architecture or detect the device.
-    Compiler logs are reported on failure and are not part of the artifact.
+    Compiler logs are reported on failure. On success the log is returned on the
+    result, and its performance remarks (WGMMA serialization, spills, stack frames)
+    are handled by ``backend_config.perf_remarks``: "warn" (default), "error" or "ignore".
     """
     from tvm_tirx.support import nvcc
 
@@ -47,7 +56,10 @@ def compile_source(source: str, backend_config=None, *, target=None) -> Compilat
         raise ValueError("NVSHMEM device linking requires target_format='cubin'")
     config["target_format"] = output_format
     driver = getattr(nvcc, f"_compile_cuda_{config['compiler']}")
-    binary, _log = driver(
+    binary, log = driver(
         source, output_format, config["arch"], compiler_options(config), use_nvshmem=use_nvshmem
     )
-    return CompilationResult(bytes(binary), output_format, {"cuda": config})
+    log = log or ""
+    remarks = parse_compiler_log(log)
+    report_perf_remarks(remarks, config.get("perf_remarks", "warn"), arch=config["arch"])
+    return CompilationResult(bytes(binary), output_format, {"cuda": config}, log, remarks)
