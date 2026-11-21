@@ -217,7 +217,13 @@ def test_floormod_simplify():
     ck = CanonicalChecker()
     flm = tvm_tirx.tirx.floormod
     x, y = tvm_tirx.tirx.Var("x", "int32"), tvm_tirx.tirx.Var("y", "int32")
-    ck.verify(flm(flm((x * 4) + y - 466036, 24528) - 24512, 16), flm((x * 4) + y + 12, 16))
+    # Reducing the offset -466036 to 12 needs x * 4 + y + 12 to fit int32, which only bounds show.
+    ck.verify(flm(flm((x * 4) + y - 466036, 24528) - 24512, 16), flm((x * 4) + y - 466036, 16))
+    bounded = CanonicalChecker()
+    bounded.constraints.append(tvm_tirx.sym.RangeConstraint(x, tvm_tirx.ir.Range(0, 2**20)))
+    bounded.constraints.append(tvm_tirx.sym.RangeConstraint(y, tvm_tirx.ir.Range(0, 4)))
+    bounded.analyzer.sync_constraint_context(bounded.constraints)
+    bounded.verify(flm(flm((x * 4) + y - 466036, 24528) - 24512, 16), flm((x * 4) + y + 12, 16))
     ck.verify(flm(flm((x * 4), 16), 8), flm(x, 2) * 4)
 
     ck.verify(flm(-x, 2), flm(x, -2) * -1)
@@ -268,15 +274,34 @@ def test_simplify_if_then_else():
         ),
         y,
     )
+    # Without bounds, x * 4 + y - 4 may overflow where x * 4 + y - 466036 does not.
     expected = tvm_tirx.tirx.if_then_else(
         tvm_tirx.tirx.LE(466036, (x * 4 + y)),
         tvm_tirx.tirx.if_then_else(
-            tvm_tirx.tirx.LE(24512, tmod(((x * 4) + y) - 4, 24528)), tmod(((x * 4) + y) - 4, 16), x
+            tvm_tirx.tirx.LE(24512, tmod(((x * 4) + y) - 466036, 24528)),
+            tmod(((x * 4) + y) - 466036, 16),
+            x,
         ),
         y,
     )
     ck.verify(res, expected)
     ck.verify(res2, expected)
+    bounded = CanonicalChecker()
+    bounded.constraints.append(tvm_tirx.sym.RangeConstraint(x, tvm_tirx.ir.Range(0, 2**20)))
+    bounded.constraints.append(tvm_tirx.sym.RangeConstraint(y, tvm_tirx.ir.Range(0, 4)))
+    bounded.analyzer.sync_constraint_context(bounded.constraints)
+    bounded.verify(
+        res,
+        tvm_tirx.tirx.if_then_else(
+            tvm_tirx.tirx.LE(466036, (x * 4 + y)),
+            tvm_tirx.tirx.if_then_else(
+                tvm_tirx.tirx.LE(24512, tmod(((x * 4) + y) - 4, 24528)),
+                tmod(((x * 4) + y) - 4, 16),
+                x,
+            ),
+            y,
+        ),
+    )
     # can only simplify if condition
     res = tvm_tirx.tirx.Select(
         tvm_tirx.tirx.all(x >= -1, y >= 0), tmod(x + y + 100, 3), tmod(x + 100, 3)

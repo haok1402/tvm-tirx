@@ -933,9 +933,13 @@ UnchangedOr<PrimExpr> RewriteSimplifier::Impl::Mutate_(const prim::FloorDivObj* 
     TVM_TRY_REWRITE_IF(floordiv(floordiv(x, c1), c2), floordiv(x, c1 * c2),
                        c1.Eval()->value > 0 && c2.Eval()->value > 0);
 
+    // x + c1 * c2 is a new term; its offset must not exceed the matched constants, or fit.
     TVM_TRY_REWRITE_IF(floordiv(floordiv(x, c1) + c2, c3), floordiv(x + c1 * c2, c1 * c3),
                        c1.Eval()->value > 0 && c3.Eval()->value > 0 &&
-                           AffineFitsType(x.Eval(), 1, c1.Eval()->value * c2.Eval()->value));
+                           (NotLarger(c1.Eval()->value * c2.Eval()->value,
+                                      std::max({c1.Eval()->value, c2.Eval()->value,
+                                                -c2.Eval()->value, c3.Eval()->value})) ||
+                            AffineFitsType(x.Eval(), 1, c1.Eval()->value * c2.Eval()->value)));
 
     if (floordiv(x * c1 + y, c2).Match(ret) || floordiv(x * c1, c2).Match(ret) ||
         floordiv(y + x * c1, c2).Match(ret)) {
@@ -1145,7 +1149,7 @@ UnchangedOr<PrimExpr> RewriteSimplifier::Impl::Mutate_(const prim::FloorModObj* 
     TVM_TRY_REWRITE_IF(
         floormod(x * c1, c2), floormod(x * floormod(c1, c2), c2),
         c2.Eval()->value != 0 &&
-            ((c1.Eval()->value > 0 && c2.Eval()->value > 0) ||
+            (NotLarger(floormod(c1.Eval()->value, c2.Eval()->value), c1.Eval()->value) ||
              AffineFitsType(x.Eval(), floormod(c1.Eval()->value, c2.Eval()->value), 0)));
 
     TVM_TRY_REWRITE_IF(floormod(x * c1 + y, c2), floormod(x, floordiv(c2, c1)) * c1 + y,
@@ -1157,13 +1161,14 @@ UnchangedOr<PrimExpr> RewriteSimplifier::Impl::Mutate_(const prim::FloorModObj* 
                        c2.Eval()->value > 0 && c1.Eval()->value % c2.Eval()->value == 0);
 
     // (x + 5) % 2 -> (x + 1) %2,  (x + 3) % 3 => x
-    // A negative c1 raises the offset, so x + floormod(c1, c2) must still fit.
+    // A negative c1 can grow the offset, so x + floormod(c1, c2) must then still fit.
     TVM_TRY_REWRITE_IF(
         floormod(x + c1, c2), floormod(x + floormod(c1, c2), c2),
         c2.Eval()->value > 0 &&
             (c1.Eval()->value >= c2.Eval()->value ||
              (c1.Eval()->value < 0 &&
-              AffineFitsType(x.Eval(), 1, floormod(c1.Eval()->value, c2.Eval()->value)))));
+              (NotLarger(floormod(c1.Eval()->value, c2.Eval()->value), c1.Eval()->value) ||
+               AffineFitsType(x.Eval(), 1, floormod(c1.Eval()->value, c2.Eval()->value))))));
 
     TVM_TRY_REWRITE_IF(floormod(x + y * c1, c2), floormod(x + y * floormod(c1, c2), c2),
                        c2.Eval()->value > 0 && c1.Eval()->value % c2.Eval()->value == 0);
