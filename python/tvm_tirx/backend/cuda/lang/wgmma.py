@@ -24,8 +24,12 @@ parts kernels get wrong:
   again. Any non-wgmma access to an accumulator between the fence and the wait
   makes ptxas serialize the chain (remark C7511/C7514, surfaced by
   ``backend_config={"cuda": {"perf_remarks": "error"}}``);
-* **shared-memory descriptors** for the canonical swizzled layouts, K-major and
-  MN-major, and their k-step advance;
+* **shared-memory operand tiles** (:class:`SmemTile`) for the canonical swizzled
+  layouts TMA writes, K-major and MN-major, and their per-k-step descriptors.
+  These are atom-aware: a K-major tile whose K extent spans several swizzle atoms
+  is several TMA boxes, ``rows * swizzle`` bytes apart. Only the 32/64/128B
+  swizzled layouts are supported; no-swizzle (interleaved core-matrix) layouts
+  have different stride semantics and raise ``ValueError``;
 * the **register fragment maps** of ISA 9.7.17.5.1: the m64nN accumulator, and
   the m64kK A operand of the register (``rs``) form. The first 16 columns of an
   f32 accumulator, packed in pairs, are exactly an rs A fragment, which is how
@@ -156,7 +160,10 @@ class WGMMA:
 
 
 def smem_descriptor(ptr, *, major="K", swizzle=128, mn_atom_stride_bytes=None):
-    """A WGMMA shared-memory matrix descriptor for a canonical swizzled tile.
+    """A WGMMA shared-memory matrix descriptor for one canonical swizzled tile.
+
+    Low level: prefer :class:`SmemTile`, whose :meth:`SmemTile.k_step` also handles
+    K extents that span several swizzle atoms.
 
     ``ptr`` is the tile's first element in shared memory, aligned to the swizzle
     atom (1024 B for 128B swizzle).
@@ -171,7 +178,7 @@ def smem_descriptor(ptr, *, major="K", swizzle=128, mn_atom_stride_bytes=None):
       loaded as one TMA box per column block, stacked, has
       ``mn_atom_stride_bytes = k_rows * swizzle``.
 
-    Returns a ``uint64`` value. Advance it along K with :func:`advance_descriptor`.
+    Returns a ``uint64`` value.
     """
     if swizzle not in (32, 64, 128):
         raise ValueError(f"WGMMA descriptors here support 32/64/128B swizzle, got {swizzle}")
@@ -199,9 +206,10 @@ def smem_descriptor(ptr, *, major="K", swizzle=128, mn_atom_stride_bytes=None):
 def advance_descriptor(desc, byte_offset):
     """``desc`` moved by ``byte_offset`` bytes (a multiple of 16) in shared memory.
 
-    For a K-major tile, K step ``k`` of an instruction is
-    ``advance_descriptor(desc, k * wgmma.k_bytes)``; for an MN-major tile it is
-    ``k * wgmma.k * swizzle`` (``wgmma.k`` rows of ``swizzle`` bytes).
+    A raw byte move, e.g. to the same tile in another pipeline stage. For the k
+    steps of a chain use :meth:`SmemTile.k_step`: inside one swizzle atom a K-major
+    step is ``k * 32`` bytes, but past the atom it jumps ``rows * swizzle`` bytes,
+    which a plain ``k * 32`` offset gets silently wrong.
     """
     if isinstance(byte_offset, int) and byte_offset % 16:
         raise ValueError(f"descriptor offsets must be multiples of 16 bytes, got {byte_offset}")
@@ -210,6 +218,81 @@ def advance_descriptor(desc, byte_offset):
         if isinstance(byte_offset, int)
         else desc + (T.Cast("uint64", byte_offset) >> T.uint64(4))
     )
+
+
+@dataclasses.dataclass(frozen=True)
+class SmemTile:
+    """A WGMMA shared-memory operand in the canonical swizzled layout TMA writes.
+
+    Parameters
+    ----------
+    ptr :
+        The tile's first byte in shared memory (1024 B aligned for 128B swizzle).
+        Pipelined kernels pass the stage's tile.
+    rows : int
+        ``major="K"``: the M (or N) extent of the tile, the rows of each K atom.
+        ``major="MN"``: the K extent, the rows of each MN atom.
+    major : str
+        ``"K"``: each row holds ``swizzle`` bytes of K. A K extent of ``E`` bytes
+        is ``E / swizzle`` atoms (one TMA box each, inner box = ``swizzle``
+        bytes), stacked ``rows * swizzle`` bytes apart.
+        ``"MN"`` (f16/bf16 only): each row holds ``swizzle`` bytes of M (N). The
+        MN extent is ``mn_bytes / swizzle`` column atoms, stacked
+        ``rows * swizzle`` bytes apart.
+    swizzle : int
+        32, 64 or 128 (bytes). No-swizzle layouts are not supported.
+    """
+
+    ptr: object
+    rows: int
+    major: str = "K"
+    swizzle: int = 128
+
+    def __post_init__(self):
+        if self.swizzle not in (32, 64, 128):
+            raise ValueError(
+                f"SmemTile supports 32/64/128B swizzle, got {self.swizzle}; no-swizzle "
+                "(interleaved core-matrix) layouts have different strides and are not supported"
+            )
+        if self.major not in ("K", "MN"):
+            raise ValueError(f"major must be 'K' or 'MN', got {self.major!r}")
+        if self.rows % 8:
+            raise ValueError(f"SmemTile rows must be a multiple of 8, got {self.rows}")
+
+    @property
+    def atom_bytes(self) -> int:
+        """Bytes between consecutive swizzle atoms (K atoms for K-major, MN atoms for MN-major)."""
+        return self.rows * self.swizzle
+
+    def descriptor(self):
+        """The descriptor of the tile's first k step."""
+        if self.major == "K":
+            return smem_descriptor(self.ptr, major="K", swizzle=self.swizzle)
+        return smem_descriptor(
+            self.ptr, major="MN", swizzle=self.swizzle, mn_atom_stride_bytes=self.atom_bytes
+        )
+
+    def k_offset_bytes(self, op: WGMMA, k):
+        """Byte offset of k step ``k`` (an int or expression) of ``op`` from the tile base."""
+        if self.major == "MN":
+            if op.is_fp8:
+                raise ValueError("fp8 WGMMA operands must be K-major")
+            return k * op.k * self.swizzle  # op.k rows of K, each `swizzle` bytes
+        k_bytes = k * op.k_bytes
+        return (k_bytes // self.swizzle) * self.atom_bytes + k_bytes % self.swizzle
+
+    def k_step(self, op: WGMMA, k, base=None):
+        """The descriptor of k step ``k`` of ``op``.
+
+        Pass ``base=self.descriptor()`` to reuse one encoded base descriptor.
+        """
+        base = self.descriptor() if base is None else base
+        return advance_descriptor(base, self.k_offset_bytes(op, k))
+
+    def k_steps(self, op: WGMMA, steps, start=0):
+        """Descriptors of ``steps`` consecutive k steps starting at ``start``."""
+        base = self.descriptor()
+        return [self.k_step(op, start + k, base) for k in range(steps)]
 
 
 def fence_operands(*tensors):

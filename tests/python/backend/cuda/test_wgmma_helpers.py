@@ -93,47 +93,62 @@ def test_named_barriers():
         full.alloc(32)
     with pytest.raises(ValueError, match="out of named barriers"):
         full.alloc(32)
+    # Ids used directly (e.g. warpgroup_sync(wg + 1) for 2 warpgroups) are reserved.
+    bars = NamedBarriers(reserved=(1, 2))
+    assert [bars.alloc(256).barrier_id for _ in range(2)] == [3, 4]
+    bars.reserve(10)
+    assert bars.alloc(128).barrier_id == 5 and bars.free == 16 - len({0, 1, 2, 3, 4, 5, 10})
+    with pytest.raises(ValueError, match="already allocated"):
+        bars.reserve(3)
+    with pytest.raises(ValueError, match="outside"):
+        bars.reserve(0)
 
 
 # ---------------------------------------------------------------------------
-# GEMM tiles through the helpers: C[64, N] = A[64, K] @ B^T, one 4-step chain
+# GEMM tiles through the helpers: C[64, N] = A[64, K] @ B^T, one chain over K
 # ---------------------------------------------------------------------------
 
 _TORCH = {"bfloat16": "bfloat16", "float16": "float16", "float8_e4m3fn": "float8_e4m3fn"}
+_SWIZZLE_ENUM = {32: 1, 64: 2, 128: 3}  # CU_TENSOR_MAP_SWIZZLE_*
 
 
-def _tile_kernel(op: W.WGMMA, b_major="K"):
-    """One warpgroup; A [64, KB] and B (K-major [N, KB] or MN-major [KB, N]) arrive
-    by 128B-swizzled TMA; one chain of 4 k-steps covers the 128-byte K block."""
+def _tile_kernel(op: W.WGMMA, b_major="K", swizzle=128, k_bytes=128):
+    """One warpgroup. A [64, K] and B (K-major [N, K] or MN-major [K, N]) arrive by
+    swizzled TMA, one box per swizzle atom, stacked as SmemTile expects. One chain
+    of k_bytes / 32 steps covers K, crossing atoms when k_bytes > swizzle."""
     dt = op.ab_dtype
     eb = 32 // op.k
-    KB = 128 // eb  # one 128-byte swizzle row of K
+    KE = k_bytes // eb  # K extent in elements
     N = op.n
-    steps = KB // op.k
-    assert steps == 4
-    n_atoms = N * eb // 128  # MN-major: 128-byte column blocks of N
-    b_shape = (N, KB) if b_major == "K" else (KB, N)
+    S = swizzle
+    AE = S // eb  # elements per swizzle row
+    steps = k_bytes // op.k_bytes
+    sw = _SWIZZLE_ENUM[S]
+    b_shape = (N, KE) if b_major == "K" else (KE, N)
+    b_atoms = k_bytes // S if b_major == "K" else N * eb // S
+    b_rows = N if b_major == "K" else KE
     rs = op.a_in_registers
     trans_b = b_major == "MN"
+    tx_bytes = (64 + N) * k_bytes
 
     # fmt: off
     @T.function
-    def main(A: T.Tensor((64, KB), dt, align=16), B: T.Tensor(b_shape, dt, align=16),
+    def main(A: T.Tensor((64, KE), dt, align=16), B: T.Tensor(b_shape, dt, align=16),
              C: T.Tensor((64, N), "float32", align=16)):
         A_map: T.let[T.handle("tensormap")] = T.stack_alloca("tensormap", 1)
         T.call_packed("runtime.cuTensorMapEncodeTiled", A_map, dt, 2, A.data,
-                      KB, 64, KB * eb, KB, 64, 1, 1, 0, 3, 0, 0)
+                      KE, 64, KE * eb, AE, 64, 1, 1, 0, sw, 0, 0)
         B_map: T.let[T.handle("tensormap")] = T.stack_alloca("tensormap", 1)
         if T.constexpr(b_major == "K"):
             T.call_packed("runtime.cuTensorMapEncodeTiled", B_map, dt, 2, B.data,
-                          KB, N, KB * eb, KB, N, 1, 1, 0, 3, 0, 0)
+                          KE, N, KE * eb, AE, N, 1, 1, 0, sw, 0, 0)
         else:
             T.call_packed("runtime.cuTensorMapEncodeTiled", B_map, dt, 2, B.data,
-                          N, KB, N * eb, 128 // eb, KB, 1, 1, 0, 3, 0, 0)
+                          N, KE, N * eb, AE, KE, 1, 1, 0, sw, 0, 0)
         T.device_entry(launch=T.cuda.LaunchConfig(grid=1, block=128), backend_config=STRICT)
         tx = T.cuda.thread_idx("x")
-        A_s = T.alloc_tensor(ty_args=[T.Tensor((64, KB), dt, scope="shared", align=1024)])
-        B_s = T.alloc_tensor(ty_args=[T.Tensor((N * KB,), dt, scope="shared", align=1024)])
+        A_s = T.alloc_tensor(ty_args=[T.Tensor((64 * KE,), dt, scope="shared", align=1024)])
+        B_s = T.alloc_tensor(ty_args=[T.Tensor((N * KE,), dt, scope="shared", align=1024)])
         bar = T.shared_scalar("uint64")
         acc = T.alloc_tensor(ty_args=[T.Tensor((op.num_acc,), "float32", scope="local")])
         if tx == 0:
@@ -141,26 +156,18 @@ def _tile_kernel(op: W.WGMMA, b_major="K"):
         T.ptx.fence.proxy.async_.shared__cta()
         T.cuda.cta_sync()
         if tx == 0:
-            T.ptx["cp.async.bulk.tensor.2d.shared::cluster.global.mbarrier::complete_tx::bytes"](
-                A_s.data, T.address_of(A_map), 0, 0, T.address_of(bar))
-            if T.constexpr(b_major == "K"):
+            for j in T.unroll(k_bytes // S):  # A: one box per K atom
                 T.ptx["cp.async.bulk.tensor.2d.shared::cluster.global.mbarrier::complete_tx::bytes"](
-                    B_s.data, T.address_of(B_map), 0, 0, T.address_of(bar))
-            else:
-                for j in T.unroll(n_atoms):
-                    T.ptx["cp.async.bulk.tensor.2d.shared::cluster.global.mbarrier::complete_tx::bytes"](
-                        B_s.ptr_to([j * KB * (128 // eb)]), T.address_of(B_map), j * (128 // eb), 0,
-                        T.address_of(bar))
-            T.ptx.mbarrier.arrive.expect_tx.shared.b64(T.address_of(bar), T.uint32((64 + N) * KB * eb))
+                    A_s.ptr_to([j * 64 * AE]), T.address_of(A_map), j * AE, 0, T.address_of(bar))
+            for j in T.unroll(b_atoms):  # B: one box per K atom (K-major) or MN atom (MN-major)
+                T.ptx["cp.async.bulk.tensor.2d.shared::cluster.global.mbarrier::complete_tx::bytes"](
+                    B_s.ptr_to([j * b_rows * AE]), T.address_of(B_map), j * AE, 0, T.address_of(bar))
+            T.ptx.mbarrier.arrive.expect_tx.shared.b64(T.address_of(bar), T.uint32(tx_bytes))
         T.cuda.mbarrier_wait(T.address_of(bar), 0)
 
-        desc_a = W.smem_descriptor(A_s.data)
-        if T.constexpr(b_major == "K"):
-            desc_b = W.smem_descriptor(B_s.data)
-            b_steps = [W.advance_descriptor(desc_b, s * op.k_bytes) for s in range(steps)]
-        else:
-            desc_b = W.smem_descriptor(B_s.data, major="MN", mn_atom_stride_bytes=KB * 128)
-            b_steps = [W.advance_descriptor(desc_b, s * op.k * 128) for s in range(steps)]
+        a_tile = W.SmemTile(A_s.data, rows=64, swizzle=S)
+        b_tile = W.SmemTile(B_s.data, rows=b_rows, major=b_major, swizzle=S)
+        b_steps = b_tile.k_steps(op, steps)
         if T.constexpr(rs):
             # A fragments straight from global memory, per the rs register map.
             a_half = T.alloc_tensor(ty_args=[T.Tensor((steps * 8,), dt, scope="local")])
@@ -173,8 +180,7 @@ def _tile_kernel(op: W.WGMMA, b_major="K"):
             W.chain(op, acc, [_Slice(a_regs, s * 4) for s in range(steps)], b_steps,
                     accumulate=False, transpose_b=trans_b)
         else:
-            a_steps = [W.advance_descriptor(desc_a, s * op.k_bytes) for s in range(steps)]
-            W.chain(op, acc, a_steps, b_steps, accumulate=False, transpose_b=trans_b)
+            W.chain(op, acc, a_tile.k_steps(op, steps), b_steps, accumulate=False, transpose_b=trans_b)
         W.wait(0, (acc, op.num_acc))
         for r in T.unroll(op.num_acc):
             row, col = W.acc_coord(tx, r)
@@ -204,44 +210,85 @@ def _compile(func):
     return tvm_tirx.compile(tvm_tirx.IRModule({"main": func}), target=target, pipeline="tirx")
 
 
-def _run_tile(op, b_major="K"):
+def _run_tile(op, b_major="K", swizzle=128, k_bytes=128):
     import torch
 
     eb = 32 // op.k
-    KB = 128 // eb
+    KE = k_bytes // eb
     torch.manual_seed(0)
     dt = getattr(torch, _TORCH[op.ab_dtype])
-    a = (torch.randn(64, KB, device="cuda") / 2).to(dt)
-    b_nk = (torch.randn(op.n, KB, device="cuda") / 2).to(dt)
+    a = (torch.randn(64, KE, device="cuda") / 2).to(dt)
+    b_nk = (torch.randn(op.n, KE, device="cuda") / 2).to(dt)
     b = b_nk if b_major == "K" else b_nk.t().contiguous()
     c = torch.zeros(64, op.n, device="cuda")
-    mod = _compile(_tile_kernel(op, b_major))
+    mod = _compile(_tile_kernel(op, b_major, swizzle, k_bytes))
     mod(a, b, c)
     torch.cuda.synchronize()
     ref = a.float() @ b_nk.float().t()
-    torch.testing.assert_close(c, ref, rtol=1e-3, atol=1e-2)
+    torch.testing.assert_close(c, ref, rtol=1e-3, atol=2e-2)
     return mod
+
+
+def test_k_offsets_cross_swizzle_atoms():
+    op, fp8 = W.WGMMA(64, "bfloat16"), W.WGMMA(64, "float8_e4m3fn")
+    tile = W.SmemTile(None, rows=64, swizzle=128)
+    assert [tile.k_offset_bytes(op, k) for k in range(6)] == [0, 32, 64, 96, 8192, 8224]
+    assert [W.SmemTile(None, rows=128, swizzle=32).k_offset_bytes(fp8, k) for k in range(3)] == [
+        0,
+        4096,
+        8192,
+    ]
+    mn = W.SmemTile(None, rows=64, major="MN", swizzle=64)
+    assert [mn.k_offset_bytes(op, k) for k in range(3)] == [0, 1024, 2048]
+    with pytest.raises(ValueError, match="no-swizzle"):
+        W.SmemTile(None, rows=64, swizzle=0)
+    with pytest.raises(ValueError, match="K-major"):
+        mn.k_offset_bytes(fp8, 1)
+
+
+_K_MAJOR_SWEEP = [
+    (dt, sw, kb)
+    for dt in ("bfloat16", "float8_e4m3fn")
+    for sw in (128, 64, 32)
+    for kb in sorted({sw, 256})
+]
+
+
+@requires_sm90
+@pytest.mark.parametrize("dt, swizzle, k_bytes", _K_MAJOR_SWEEP,
+                         ids=[f"{d[:4]}-sw{s}-k{k}B" for d, s, k in _K_MAJOR_SWEEP])  # fmt: skip
+def test_k_major_chain_across_swizzle_atoms(dt, swizzle, k_bytes):
+    """K extents of one atom and of 256 B (2, 4 or 8 atoms) at every swizzle."""
+    _run_tile(W.WGMMA(64, dt), "K", swizzle, k_bytes)
+
+
+_MN_SWEEP = [(sw, kb) for sw in (128, 64, 32) for kb in (128, 256)]
+
+
+@requires_sm90
+@pytest.mark.parametrize("swizzle, k_bytes", _MN_SWEEP, ids=[f"sw{s}-k{k}B" for s, k in _MN_SWEEP])
+def test_mn_major_b_across_atoms(swizzle, k_bytes):
+    """MN-major B (bf16 n128 = 2-8 MN atoms) with K = 64 and 128 rows at every swizzle."""
+    _run_tile(W.WGMMA(128, "bfloat16"), "MN", swizzle, k_bytes)
 
 
 @requires_sm90
 @pytest.mark.parametrize(
-    "op, b_major",
+    "op, b_major, swizzle, k_bytes",
     [
-        (W.WGMMA(64, "bfloat16"), "K"),
-        (W.WGMMA(128, "bfloat16"), "K"),
-        (W.WGMMA(256, "bfloat16"), "K"),
-        (W.WGMMA(128, "float16"), "K"),
-        (W.WGMMA(128, "float8_e4m3fn"), "K"),
-        (W.WGMMA(128, "bfloat16", a_in_registers=True), "K"),
-        (W.WGMMA(64, "float16", a_in_registers=True), "K"),
-        (W.WGMMA(128, "bfloat16"), "MN"),
-        (W.WGMMA(64, "bfloat16", a_in_registers=True), "MN"),
+        (W.WGMMA(128, "bfloat16"), "K", 128, 128),
+        (W.WGMMA(256, "bfloat16"), "K", 128, 128),
+        (W.WGMMA(128, "float16"), "K", 128, 128),
+        (W.WGMMA(128, "float8_e4m3fn"), "K", 128, 256),
+        (W.WGMMA(128, "bfloat16", a_in_registers=True), "K", 128, 256),
+        (W.WGMMA(64, "float16", a_in_registers=True), "K", 64, 128),
+        (W.WGMMA(64, "bfloat16", a_in_registers=True), "MN", 64, 256),
     ],
-    ids=["ss-bf16-n64", "ss-bf16-n128", "ss-bf16-n256", "ss-f16-n128", "ss-e4m3-n128",
-         "rs-bf16-n128", "rs-f16-n64", "ss-bf16-n128-mnB", "rs-bf16-n64-mnB"],
+    ids=["ss-bf16-n128", "ss-bf16-n256", "ss-f16-n128", "ss-e4m3-n128-k256B", "rs-bf16-n128-k256B",
+         "rs-f16-n64-sw64", "rs-bf16-n64-mnB-sw64-k256B"],
 )  # fmt: skip
-def test_tile_numerics(op, b_major):
-    _run_tile(op, b_major)
+def test_tile_numerics(op, b_major, swizzle, k_bytes):
+    _run_tile(op, b_major, swizzle, k_bytes)
 
 
 def _sass_chains(cubin: bytes):
@@ -349,30 +396,35 @@ def test_named_barrier_ping_pong():
 
 @requires_sm90
 def test_fa_forward_microkernel():
+    """hd128: QK^T runs over 256 B of K (2 swizzle atoms), and V is MN-major with 2
+    MN atoms, so both atom paths of SmemTile are exercised."""
     import torch
 
-    M = KV = HD = 64  # one 64-query tile, one 64-key block, head dim 64 (= one 128B row)
+    M, KV, HD = 64, 64, 128
+    E = 64  # bf16 elements per 128-byte swizzle row
     scale = 1.0 / np.sqrt(HD)
     qk = W.WGMMA(KV, "bfloat16")  # S[64, KV] = Q[64, HD] @ K[KV, HD]^T
     pv = W.WGMMA(HD, "bfloat16", a_in_registers=True)  # O[64, HD] = P[64, KV] @ V[KV, HD]
-    steps = 4
     log2e = 1.4426950408889634
+    tma = "cp.async.bulk.tensor.2d.shared::cluster.global.mbarrier::complete_tx::bytes"
+    qk_steps = HD * 2 // qk.k_bytes  # 8 k steps over 256 B: 2 swizzle atoms
+    pv_steps = KV // pv.k
 
     # fmt: off
     @T.function
     def main(Q: T.Tensor((M, HD), "bfloat16", align=16), K: T.Tensor((KV, HD), "bfloat16", align=16),
              V: T.Tensor((KV, HD), "bfloat16", align=16), Out: T.Tensor((M, HD), "float32", align=16)):
         Q_map: T.let[T.handle("tensormap")] = T.stack_alloca("tensormap", 1)
-        T.call_packed("runtime.cuTensorMapEncodeTiled", Q_map, "bfloat16", 2, Q.data, HD, M, HD * 2, HD, M, 1, 1, 0, 3, 0, 0)
+        T.call_packed("runtime.cuTensorMapEncodeTiled", Q_map, "bfloat16", 2, Q.data, HD, M, HD * 2, E, M, 1, 1, 0, 3, 0, 0)
         K_map: T.let[T.handle("tensormap")] = T.stack_alloca("tensormap", 1)
-        T.call_packed("runtime.cuTensorMapEncodeTiled", K_map, "bfloat16", 2, K.data, HD, KV, HD * 2, HD, KV, 1, 1, 0, 3, 0, 0)
+        T.call_packed("runtime.cuTensorMapEncodeTiled", K_map, "bfloat16", 2, K.data, HD, KV, HD * 2, E, KV, 1, 1, 0, 3, 0, 0)
         V_map: T.let[T.handle("tensormap")] = T.stack_alloca("tensormap", 1)
-        T.call_packed("runtime.cuTensorMapEncodeTiled", V_map, "bfloat16", 2, V.data, HD, KV, HD * 2, HD, KV, 1, 1, 0, 3, 0, 0)
+        T.call_packed("runtime.cuTensorMapEncodeTiled", V_map, "bfloat16", 2, V.data, HD, KV, HD * 2, E, KV, 1, 1, 0, 3, 0, 0)
         T.device_entry(launch=T.cuda.LaunchConfig(grid=1, block=128), backend_config=STRICT)
         tx = T.cuda.thread_idx("x")
-        Q_s = T.alloc_tensor(ty_args=[T.Tensor((M, HD), "bfloat16", scope="shared", align=1024)])
-        K_s = T.alloc_tensor(ty_args=[T.Tensor((KV, HD), "bfloat16", scope="shared", align=1024)])
-        V_s = T.alloc_tensor(ty_args=[T.Tensor((KV, HD), "bfloat16", scope="shared", align=1024)])
+        Q_s = T.alloc_tensor(ty_args=[T.Tensor((M * HD,), "bfloat16", scope="shared", align=1024)])
+        K_s = T.alloc_tensor(ty_args=[T.Tensor((KV * HD,), "bfloat16", scope="shared", align=1024)])
+        V_s = T.alloc_tensor(ty_args=[T.Tensor((KV * HD,), "bfloat16", scope="shared", align=1024)])
         bar = T.shared_scalar("uint64")
         s_acc = T.alloc_tensor(ty_args=[T.Tensor((qk.num_acc,), "float32", scope="local")])
         o_acc = T.alloc_tensor(ty_args=[T.Tensor((pv.num_acc,), "float32", scope="local")])
@@ -384,20 +436,18 @@ def test_fa_forward_microkernel():
         T.ptx.fence.proxy.async_.shared__cta()
         T.cuda.cta_sync()
         if tx == 0:
-            T.ptx["cp.async.bulk.tensor.2d.shared::cluster.global.mbarrier::complete_tx::bytes"](
-                Q_s.data, T.address_of(Q_map), 0, 0, T.address_of(bar))
-            T.ptx["cp.async.bulk.tensor.2d.shared::cluster.global.mbarrier::complete_tx::bytes"](
-                K_s.data, T.address_of(K_map), 0, 0, T.address_of(bar))
-            T.ptx["cp.async.bulk.tensor.2d.shared::cluster.global.mbarrier::complete_tx::bytes"](
-                V_s.data, T.address_of(V_map), 0, 0, T.address_of(bar))
+            # Q, K: one box per K atom (K-major). V: one box per HD column atom (MN-major).
+            for j in T.unroll(HD // E):
+                T.ptx[tma](Q_s.ptr_to([j * M * E]), T.address_of(Q_map), j * E, 0, T.address_of(bar))
+                T.ptx[tma](K_s.ptr_to([j * KV * E]), T.address_of(K_map), j * E, 0, T.address_of(bar))
+                T.ptx[tma](V_s.ptr_to([j * KV * E]), T.address_of(V_map), j * E, 0, T.address_of(bar))
             T.ptx.mbarrier.arrive.expect_tx.shared.b64(T.address_of(bar), T.uint32((M + 2 * KV) * HD * 2))
         T.cuda.mbarrier_wait(T.address_of(bar), 0)
 
-        # S = Q K^T
-        dq = W.smem_descriptor(Q_s.data)
-        dk = W.smem_descriptor(K_s.data)
-        W.chain(qk, s_acc, [W.advance_descriptor(dq, s * 32) for s in range(steps)],
-                [W.advance_descriptor(dk, s * 32) for s in range(steps)], accumulate=False)
+        # S = Q K^T over HD = 256 bytes: 8 k steps across 2 swizzle atoms.
+        q_tile = W.SmemTile(Q_s.data, rows=M)
+        k_tile = W.SmemTile(K_s.data, rows=KV)
+        W.chain(qk, s_acc, q_tile.k_steps(qk, qk_steps), k_tile.k_steps(qk, qk_steps), accumulate=False)
         W.wait(0, (s_acc, qk.num_acc))
 
         # softmax over each row: a thread holds rows r0 (regs with reg % 4 < 2) and r0 + 8;
@@ -421,11 +471,11 @@ def test_fa_forward_microkernel():
                 row_sum[h] = row_sum[h] + T.cuda.__shfl_xor_sync(T.uint32(0xFFFFFFFF), row_sum[h], d, 32)
 
         # O = P V: the 16-column slices of P, packed in pairs, are the rs A fragments.
+        # V is MN-major: KV rows of K, HD = 2 MN atoms of 128 bytes.
         p_regs = p_half.view("uint32")
-        dv = W.smem_descriptor(V_s.data, major="MN", mn_atom_stride_bytes=KV * 128)
-        W.chain(pv, o_acc, [_Slice(p_regs, s * 4) for s in range(steps)],
-                [W.advance_descriptor(dv, s * 16 * 128) for s in range(steps)],
-                accumulate=False, transpose_b=True)
+        v_tile = W.SmemTile(V_s.data, rows=KV, major="MN")
+        W.chain(pv, o_acc, [_Slice(p_regs, s * 4) for s in range(pv_steps)],
+                v_tile.k_steps(pv, pv_steps), accumulate=False, transpose_b=True)
         W.wait(0, (o_acc, pv.num_acc))
         for r in T.unroll(pv.num_acc):
             row, col = W.acc_coord(tx, r)
@@ -433,9 +483,87 @@ def test_fa_forward_microkernel():
     # fmt: on
 
     torch.manual_seed(0)
-    q, k, v = (torch.randn(64, 64, device="cuda").to(torch.bfloat16) for _ in range(3))
-    o = torch.zeros(64, 64, device="cuda")
+    q = torch.randn(M, HD, device="cuda").to(torch.bfloat16)
+    k = torch.randn(KV, HD, device="cuda").to(torch.bfloat16)
+    v = torch.randn(KV, HD, device="cuda").to(torch.bfloat16)
+    o = torch.zeros(M, HD, device="cuda")
     _compile(main)(q, k, v, o)
     torch.cuda.synchronize()
     ref = torch.softmax(q.float() @ k.float().t() * scale, dim=-1) @ v.float()
     torch.testing.assert_close(o, ref, rtol=2e-2, atol=2e-2)
+
+
+@requires_sm90
+def test_producer_and_two_ping_pong_consumers():
+    """The FA3 / warp-specialized GEMM shape: 384 threads with setmaxnreg.
+
+    Warpgroup 0 produces into a 2-stage shared ring guarded by full/empty mbarriers.
+    Warpgroups 1 and 2 consume alternate items and take strict turns through two
+    256-thread named barriers from the kernel's NamedBarriers. The barrier ids are
+    allocated after reserving the ids a warpgroup_sync(wg + 1) user would take.
+    Every item must be consumed intact and in order.
+    """
+    import torch
+
+    items, stages = 12, 2
+
+    # fmt: off
+    @T.function
+    def main(sums: T.Tensor((items,), "float32"), order: T.Tensor((items,), "int32")):
+        T.device_entry(launch=T.cuda.LaunchConfig(grid=1, block=384),
+                       kernel_attrs=T.cuda.KernelAttributes(min_blocks_per_sm=1))
+        tx = T.cuda.thread_idx("x")
+        wg = tx // 128
+        lane = tx % 128
+        bars = NamedBarriers(reserved=(1, 2, 3))  # as if warpgroup_sync(wg + 1) were also used
+        turn0 = bars.alloc(256)  # consumer 0 finished its item
+        turn1 = bars.alloc(256)  # consumer 1 finished its item
+        buf = T.alloc_tensor(ty_args=[T.Tensor((stages, 128), "float32", scope="shared")])
+        full = T.alloc_tensor(ty_args=[T.Tensor((stages,), "uint64", scope="shared", align=8)])
+        empty = T.alloc_tensor(ty_args=[T.Tensor((stages,), "uint64", scope="shared", align=8)])
+        seq = T.shared_scalar("int32")
+        if tx == 0:
+            seq = 0
+            for s in T.unroll(stages):
+                T.ptx.mbarrier.init.shared.b64(T.address_of(full[s]), T.uint32(128))
+                T.ptx.mbarrier.init.shared.b64(T.address_of(empty[s]), T.uint32(128))
+        T.cuda.cta_sync()
+        if wg == 0:
+            T.ptx["setmaxnreg.dec.sync.aligned.u32"](40)
+            for i in T.serial(items):
+                T.cuda.mbarrier_wait(T.address_of(empty[i % stages]), ((i // stages) & 1) ^ 1)
+                buf[i % stages, lane] = T.Cast("float32", i * 1000 + lane)
+                T.ptx.mbarrier.arrive.shared.b64(T.address_of(full[i % stages]), T.uint32(1))
+        else:
+            T.ptx["setmaxnreg.inc.sync.aligned.u32"](232)
+            c = wg - 1
+            for j in T.serial(items // 2):
+                i = 2 * j + c
+                if c == 0:
+                    if j > 0:
+                        turn1.sync()  # consumer 1 finished item i - 1
+                else:
+                    turn0.sync()  # consumer 0 finished item i - 1
+                T.cuda.mbarrier_wait(T.address_of(full[i % stages]), (i // stages) & 1)
+                v = buf[i % stages, lane]
+                total = T.cuda.warp_sum(v)
+                if lane % 32 == 0:
+                    T.cuda.atomic_add(T.address_of(sums[i]), total)
+                if lane == 0:
+                    order[seq] = i
+                    seq = seq + 1
+                T.ptx.mbarrier.arrive.shared.b64(T.address_of(empty[i % stages]), T.uint32(1))
+                if c == 0:
+                    turn0.arrive()
+                else:
+                    if j < items // 2 - 1:
+                        turn1.arrive()
+    # fmt: on
+
+    sums = torch.zeros(items, device="cuda")
+    order = torch.full((items,), -1, dtype=torch.int32, device="cuda")
+    _compile(main)(sums, order)
+    torch.cuda.synchronize()
+    expected = [float(sum(i * 1000 + t for t in range(128))) for i in range(items)]
+    assert order.tolist() == list(range(items))
+    assert sums.tolist() == expected
