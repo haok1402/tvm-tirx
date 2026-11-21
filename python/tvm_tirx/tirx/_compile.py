@@ -245,8 +245,26 @@ def compile(  # pylint: disable=redefined-builtin
         for target, device_mod in device_mod_dict.items()
     }
 
-    # Convert TIR IRModules to runtime Module by calling target.build
-    return Executable(_codegen_host_and_device(host_mod, device_mod_dict, target_host))
+    # Convert TIR IRModules to runtime Module by calling target.build. CUDA device
+    # compiles run inside the C++ module factory; collect their ptxas performance
+    # remarks so they reach the caller as data (and error mode as PerfRemarkError).
+    from tvm_tirx.backend.cuda.perf_remarks import (  # pylint: disable=import-outside-toplevel
+        PerfRemarkError,
+        collect_perf_remarks,
+    )
+
+    with collect_perf_remarks() as collected:
+        try:
+            runtime_mod = _codegen_host_and_device(host_mod, device_mod_dict, target_host)
+        except Exception as err:  # pylint: disable=broad-except
+            if collected.error is not None and not (
+                isinstance(err, PerfRemarkError) and err.remarks
+            ):
+                raise collected.error from err
+            raise
+    executable = Executable(runtime_mod)
+    executable.perf_remarks = tuple(collected.remarks)
+    return executable
 
 
 # C++ compiler consumers link the generated runtime module directly.

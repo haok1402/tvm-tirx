@@ -72,12 +72,12 @@ ptxas info    : Used 90 registers, used 0 barriers, 24576 bytes smem
 
 def test_parse_wgmma_serialization_remarks():
     remarks = parse_compiler_log(_SERIALIZED_LOG)
-    assert [(r.kind, r.code, r.function) for r in remarks] == [
-        ("ptxas", "C7517", "main_kernel"),
-        ("ptxas", "C7511", "main_kernel"),
+    assert [(r.kind, r.code, r.function, r.arch) for r in remarks] == [
+        ("ptxas", "C7517", "main_kernel", "sm_90a"),
+        ("ptxas", "C7511", "main_kernel", "sm_90a"),
     ]
     assert "serialized due to insufficient register resources" in remarks[1].message
-    assert str(remarks[1]).startswith("[C7511] in main_kernel: Potential Performance Loss")
+    assert str(remarks[1]).startswith("[C7511] in main_kernel (sm_90a): Potential Performance Loss")
 
 
 def test_parse_spills_and_stack_frames():
@@ -86,10 +86,52 @@ def test_parse_spills_and_stack_frames():
         kind="spill",
         message="964 bytes spill stores, 964 bytes spill loads (504 bytes stack frame)",
         function="main_kernel",
+        arch="sm_90a",
     )
     (stack,) = parse_compiler_log(_STACK_LOG)
     assert (stack.kind, stack.function) == ("stack", "helper_fn")
     assert "1072 bytes stack frame" in stack.message
+
+
+# nvcc -fatbin for sm_90a and sm_100a, two kernels (CUDA 13.2): each target's
+# (C75xx) remarks come before its "Compiling entry function" headers. C7508 names
+# no function.
+_MULTI_ARCH_LOG = "\n".join(
+    [
+        f"ptxas info    : (C7508) Potential Performance Loss: 'setmaxnreg' ignored; unable"
+        f" to determine register count at entry.\n"
+        f"ptxas info    : 0 bytes gmem\n"
+        f"ptxas info    : Compiling entry function 'hog_kernel' for '{arch}'\n"
+        f"ptxas info    : Function properties for hog_kernel\n"
+        f"    552 bytes stack frame, 1060 bytes spill stores, 1072 bytes spill loads\n"
+        f"ptxas info    : Compiling entry function 'setmax_kernel' for '{arch}'\n"
+        f"ptxas info    : Function properties for setmax_kernel\n"
+        f"    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads"
+        for arch in ("sm_90a", "sm_100a")
+    ]
+)
+
+
+def test_parse_multi_arch_log_tags_each_target():
+    remarks = parse_compiler_log(_MULTI_ARCH_LOG)
+    assert [(r.kind, r.code, r.function, r.arch) for r in remarks] == [
+        ("ptxas", "C7508", None, "sm_90a"),
+        ("spill", None, "hog_kernel", "sm_90a"),
+        ("ptxas", "C7508", None, "sm_100a"),
+        ("spill", None, "hog_kernel", "sm_100a"),
+    ]
+
+
+def test_unnamed_remark_goes_to_the_only_entry_function():
+    log = (
+        "ptxas info    : (C7508) Potential Performance Loss: 'setmaxnreg' ignored; unable to"
+        " determine register count at entry.\n"
+        "ptxas info    : Compiling entry function 'main_kernel' for 'sm_100a'\n"
+    )
+    (remark,) = parse_compiler_log(log)
+    assert (remark.code, remark.function, remark.arch) == ("C7508", "main_kernel", "sm_100a")
+    (remark,) = parse_compiler_log(log.splitlines()[0], arch="sm_90a")
+    assert (remark.function, remark.arch) == (None, "sm_90a")
 
 
 def test_parse_clean_and_empty_logs():
@@ -235,7 +277,8 @@ def test_clean_wgmma_chain_has_no_remarks(k_steps):
 
 @requires_nvrtc
 def test_register_spills_are_reported():
-    with pytest.warns(TIRxPerfWarning, match=r"\[spill\] in main_kernel: \d+ bytes spill stores"):
+    spill = r"\[spill\] in main_kernel \(sm_90a\): \d+ bytes spill stores"
+    with pytest.warns(TIRxPerfWarning, match=spill):
         result = _compile(_register_hog(min_blocks_per_sm=16))
     assert [r.kind for r in result.remarks] == ["spill"]
     with warnings.catch_warnings():
@@ -243,10 +286,29 @@ def test_register_spills_are_reported():
         assert _compile(_register_hog(min_blocks_per_sm=1)).remarks == ()
 
 
-@requires_nvrtc
-def test_error_mode_through_tvm_tirx_compile():
-    """The CUDA module factory compiles through the same path; error mode stops the build."""
-    func = _wgmma_chain(hazard=True, backend_config={"cuda": {"perf_remarks": "error"}})
+def _tirx_compile(func):
     target = tvm_tirx.target.Target({"kind": "cuda", "arch": "sm_90a"})
-    with pytest.raises(Exception, match=r"PerfRemarkError: ptxas reported"):
-        tvm_tirx.compile(tvm_tirx.IRModule({"main": func}), target=target, pipeline="tirx")
+    return tvm_tirx.compile(tvm_tirx.IRModule({"main": func}), target=target, pipeline="tirx")
+
+
+@requires_nvrtc
+def test_error_mode_through_tvm_tirx_compile_is_structured():
+    """The CUDA module factory compiles inside C++. tvm_tirx.compile still raises a
+    PerfRemarkError that carries the structured remarks."""
+    func = _wgmma_chain(hazard=True, backend_config={"cuda": {"perf_remarks": "error"}})
+    with pytest.raises(PerfRemarkError, match=r"performance remark\(s\) for sm_90a") as info:
+        _tirx_compile(func)
+    codes = {r.code for r in info.value.remarks}
+    assert codes and all(code.startswith("C75") for code in codes)
+    assert all(r.function == "main_kernel" and r.arch == "sm_90a" for r in info.value.remarks)
+
+
+@requires_nvrtc
+def test_warn_mode_remarks_are_on_the_executable():
+    with pytest.warns(TIRxPerfWarning):
+        exe = _tirx_compile(_wgmma_chain(hazard=True))
+    assert exe.perf_remarks and {r.code for r in exe.perf_remarks} >= {"C7517"}
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", TIRxPerfWarning)
+        exe = _tirx_compile(_wgmma_chain(hazard=False, k_steps=4))
+    assert exe.perf_remarks == ()
