@@ -153,6 +153,39 @@ def _reshape_layout(tile, shape):
     )
 
 
+def _with_source_offset(buf, layout):
+    """Rebase an explicit view layout onto the first element of a memory-tile ``buf``.
+
+    Sub-tensors share the data pointer of their source and carry their start in the offset of
+    the (inner) tile layout, so an explicit layout, which addresses the view's own elements,
+    needs that offset too. A source that is not a plain memory tile, such as a lane-distributed
+    register layout, places storage slots directly: an explicit layout over it stays physical.
+    Named layouts such as ``"default"`` are left to their resolver.
+    """
+    from .layout import ComposeLayout, TileLayout
+
+    def tile_of(value):
+        return value.tile_layout if isinstance(value, ComposeLayout) else value
+
+    if buf.layout is None or _is_tmem_scope(buf.scope()):
+        return layout
+    source = tile_of(buf.layout)
+    target = tile_of(layout)
+    if not isinstance(target, TileLayout) or not _is_memory_tile(source, buf.shape):
+        return layout
+    if not source.offset:
+        return layout
+    offset = dict(target.offset.items())
+    for axis, value in source.offset.items():
+        offset[axis] = offset[axis] + value if axis in offset else value
+    target = TileLayout.from_iters(list(target.shard), list(target.replica), offset=offset)
+    if isinstance(layout, ComposeLayout):
+        return ComposeLayout(
+            layout.per_element, layout.swizzle_len, layout.atom_len, target, layout.swizzle_inner
+        )
+    return target
+
+
 def view(buf: Var, *args, **kwargs) -> Var:
     """Implement :meth:`TensorType.view`."""
 
@@ -236,7 +269,7 @@ def view(buf: Var, *args, **kwargs) -> Var:
     if layout is None:
         shape = _infer_shape(shape)
     if layout is not None:
-        return _redecl(buf, shape, layout)
+        return _redecl(buf, shape, _with_source_offset(buf, layout))
     analyzer = tvm_tirx.sym.Analyzer()
     if not analyzer.can_prove_equal(
         functools.reduce(lambda a, b: a * b, buf.shape, 1),
