@@ -17,8 +17,9 @@
 """Warp-collective results stay where they are computed (sm90-probe ISSUE-008).
 
 A full-mask shuffle in the short-circuit operand of ``||`` runs on a subset of the warp, which
-is undefined behavior and hangs on H200. The value of ``broadcast_warpgroup_id()`` must be
-computed once, where it is called, and only read in later expressions.
+is undefined behavior and hangs on H200. The value of ``broadcast_warpgroup_id()``, and of the
+other value-returning warp collectives, must be computed once, where it is called, and only
+read in later expressions.
 """
 
 import re
@@ -77,6 +78,90 @@ def test_broadcast_is_bound_outside_short_circuit(via_helper):
     assert len(shuffles) == 1, shuffles
     assert re.match(r"int \w+ = .*__shfl_sync", shuffles[0]), shuffles[0]
     assert "||" not in shuffles[0] and "?" not in shuffles[0], shuffles[0]
+
+
+def _ballot_kernel():
+    def mask(tx):
+        ballot = T.cuda.ballot_sync(T.uint32(0xFFFFFFFF), tx % 3 == 0)
+        return T.Or(tx % 8 >= 3, ballot > T.uint32(5)), ballot
+
+    @T.function
+    def main(out: T.Tensor((32,), "uint32")):
+        T.device_entry(launch=T.cuda.LaunchConfig(grid=1, block=32))
+        tx = T.cuda.thread_idx("x")
+        masked, ballot = mask(tx)
+        out[tx] = T.Select(masked, T.uint32(0), ballot)
+
+    return main
+
+
+def test_ballot_is_bound_outside_short_circuit():
+    _, src = _compile(_ballot_kernel())
+    body = src[src.find("main_kernel(") :]
+    ballots = [line.strip() for line in body.splitlines() if "ballot_sync(" in line]
+    assert len(ballots) == 1, ballots
+    assert re.match(r"uint \w+ = .*ballot_sync\(", ballots[0]), ballots[0]
+
+
+def _shuffle_mask(tx):
+    value = T.gpu_warp_shuffle(T.uint32(0xFFFFFFFF), tx * 3, 0, 32, 32)
+    return T.Or(tx % 8 >= 3, value > 5), value
+
+
+def test_warp_shuffle_is_bound_outside_short_circuit():
+    @T.function
+    def main(out: T.Tensor((32,), "int32")):
+        T.device_entry(launch=T.cuda.LaunchConfig(grid=1, block=32))
+        tx = T.cuda.thread_idx("x")
+        masked, value = _shuffle_mask(tx)
+        out[tx] = T.Select(masked, 0, value)
+
+    _, src = _compile(main)
+    body = src[src.find("main_kernel(") :]
+    shuffles = [line.strip() for line in body.splitlines() if "__shfl_sync" in line]
+    assert len(shuffles) == 1, shuffles
+    assert re.match(r"int \w+ = .*__shfl_sync", shuffles[0]), shuffles[0]
+
+
+@pytest.mark.parametrize(
+    "collective, symbol",
+    [
+        (lambda tx: T.cuda.__shfl_xor_sync(T.uint32(0xFFFFFFFF), tx * 3, 1, 32), "__shfl_xor_sync"),
+        (lambda tx: T.cuda.warp_sum(tx * 3), "warp_reduce"),
+    ],
+)
+def test_cuda_collectives_are_bound(collective, symbol):
+    def helper(tx):
+        value = collective(tx)
+        return T.Or(tx % 8 >= 3, value > 5), value
+
+    @T.function
+    def main(out: T.Tensor((32,), "int32")):
+        T.device_entry(launch=T.cuda.LaunchConfig(grid=1, block=32))
+        tx = T.cuda.thread_idx("x")
+        masked, value = helper(tx)
+        out[tx] = T.Select(masked, 0, value)
+
+    _, src = _compile(main)
+    body = src[src.find("main_kernel(") :]
+    calls = [line.strip() for line in body.splitlines() if symbol in line]
+    assert len(calls) == 1, calls
+    assert re.match(rf"int \w+ = .*{symbol}", calls[0]), calls[0]
+
+
+@pytest.mark.parametrize(
+    "construct",
+    [
+        lambda: T.cuda.broadcast_warpgroup_id(),
+        lambda: T.cuda.__shfl_sync(T.uint32(0xFFFFFFFF), 1, 0, 32),
+        lambda: T.gpu_warp_shuffle(T.uint32(0xFFFFFFFF), 1, 0, 32, 32),
+    ],
+)
+def test_collective_outside_kernel_body_raises(construct):
+    # e.g. precomputed in a Python kernel factory, then used in the body: the unbound call
+    # would be re-emitted at each use.
+    with pytest.raises(RuntimeError, match="inside the kernel body"):
+        construct()
 
 
 @pytest.mark.gpu
