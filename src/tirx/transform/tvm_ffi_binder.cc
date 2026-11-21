@@ -785,6 +785,8 @@ Expr TVMFFIABIBuilder::DecodeParamDLTensor(const TensorVar& tensor, const PrimEx
   // ── Section: int32 index span (tirx.enable_debug) ──────────────
   // A symbolic shape with 32-bit dimensions keeps 32-bit index arithmetic, which is valid only
   // for spans of at most 2^30 elements (see LowerTensorLayouts and NarrowDataType). Check it here.
+  // The span is the product of the shape: strides and the layout of a strided view are not
+  // included, so a view whose storage extends further is not covered by this check.
   if (transform::PassContext::Current()->GetConfig<bool>("tirx.enable_debug").value_or(false)) {
     // The flat index stays 32-bit only when every dimension is; one int64 dimension makes the
     // offset arithmetic int64.

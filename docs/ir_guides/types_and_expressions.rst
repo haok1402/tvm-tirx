@@ -244,7 +244,9 @@ in ``A``'s shape above.
    within 2^30 elements. Declare ``T.dynamic("n", "int64")`` for tensors
    that may be larger. Compiling with
    ``PassContext(config={"tirx.enable_debug": True})`` adds a host-side
-   check of this assertion on every call. The loop index ``i`` is defined by
+   check of this assertion on every call. The check uses the product of
+   the argument's shape; strides are not included, so a strided view whose
+   storage extends further is not covered. The loop index ``i`` is defined by
 ``for i in range(n)``. It is an int32 ``Var`` that the loop body uses to
 read ``A[i]`` and write ``B[i]``.
 

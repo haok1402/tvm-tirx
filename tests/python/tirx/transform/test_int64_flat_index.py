@@ -59,6 +59,13 @@ def _symbolic_fill(dim_dtype):
     return main
 
 
+def _assert_filled(out, expected_row, chunk=4096):
+    """Check every row of out against expected_row(rows) in chunks, without a full-size copy."""
+    for start in range(0, out.shape[0], chunk):
+        rows = np.arange(start, min(start + chunk, out.shape[0]))
+        np.testing.assert_array_equal(out[rows[0] : rows[-1] + 1], expected_row(rows))
+
+
 def _compile(func, arch="sm_90a", config=None):
     target = tvm_tirx.target.Target({"kind": "cuda", "arch": arch})
     with tvm_tirx.transform.PassContext(config=config or {}):
@@ -99,10 +106,8 @@ def test_store_beyond_int32_elements():
     mod, _ = _compile(_fill(M, N), arch=env.cuda_arch())
     A = tvm_tirx.runtime.tensor(np.full((M, N), -1, dtype="int8"), device=tvm_tirx.cuda(0))
     mod(A)
-    out = A.numpy()
-    j = np.arange(N) // 256
-    for bx in (0, 65535, 65536):
-        np.testing.assert_array_equal(out[bx], (bx % 100 + j % 7).astype("int8"))
+    j7 = (np.arange(N) // 256 % 7).astype("int8")
+    _assert_filled(A.numpy(), lambda rows: (rows % 100).astype("int8")[:, None] + j7[None, :])
 
 
 @pytest.mark.gpu
@@ -147,9 +152,10 @@ def test_debug_check_skips_int64_indexed_shapes(m_dtype, n):
     M, N = 262145, 8192  # 2^31 + 2^13 elements
     A = tvm_tirx.runtime.empty((M, N), "int8", device=tvm_tirx.cuda(0))
     mod(A)
-    out = A.numpy()
-    for bx in (0, 262143, 262144):
-        assert (out[bx] == bx % 100).all(), bx
+    _assert_filled(
+        A.numpy(),
+        lambda rows: np.broadcast_to((rows % 100).astype("int8")[:, None], (len(rows), N)),
+    )
 
 
 if __name__ == "__main__":

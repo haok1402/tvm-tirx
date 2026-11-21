@@ -66,7 +66,8 @@ def dynamic(name: str, dtype: str = "int32", *, loc: LocationEntry | Location = 
     int64 automatically. A symbolic span cannot be checked at compile time, so 32-bit shape
     variables assert that their tensors stay within 2^30 elements. Use ``dtype="int64"`` for
     tensors that may be larger. With ``tirx.enable_debug`` the host checks this assertion on
-    every call.
+    every call, using the product of the argument's shape; strides are not included, so a
+    strided view whose storage extends further is not covered.
     """
     return Var(name, dtype, loc.loc if isinstance(loc, LocationEntry) else loc)
 
