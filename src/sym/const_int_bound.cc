@@ -503,6 +503,22 @@ class ConstIntBoundAnalyzer::Impl final
     return Union(a, b);
   }
 
+  Entry Dispatch_(const CallObj* op) final {
+    if (const auto* callee = op->op.as<OpObj>();
+        callee && Op::HasAttrMap(op_attr::kConstIntBound)) {
+      auto bounds = Op::GetAttrMap(op_attr::kConstIntBound);
+      Op key = ffi::GetRef<Op>(callee);
+      if (bounds.count(key)) {
+        ffi::Optional<ConstIntBound> bound = bounds[key].CallExpected(op).value();
+        if (bound.has_value()) {
+          return Intersect(MakeBound(bound.value()->min_value, bound.value()->max_value),
+                           Everything(op->ty.as_or_throw<PrimType>()));
+        }
+      }
+    }
+    return DispatchDefault_(op);
+  }
+
   Entry Dispatch_(const VarObj* op) final {
     Var v = ffi::GetRef<Var>(op);
     const auto& facts = detail::TempConstraintScope::Query(parent_);

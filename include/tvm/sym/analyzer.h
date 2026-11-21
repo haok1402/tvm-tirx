@@ -135,6 +135,18 @@ class ConstIntBound : public ffi::ObjectRef {
   TVM_FFI_DEFINE_OBJECT_REF_METHODS_NOTNULLABLE(ConstIntBound, ffi::ObjectRef, ConstIntBoundObj);
 };
 
+namespace op_attr {
+/*!
+ * \brief Constant bounds of a pure operator's integer result, e.g. a hardware index register.
+ *
+ * Returns std::nullopt when the call has no known bound. ConstIntBoundAnalyzer otherwise treats
+ * a call as covering its whole type.
+ */
+inline constexpr ffi::reflection::AttrKey<
+    ffi::reflection::NativeFunctionView<ffi::Optional<ConstIntBound>(const CallObj* call)>>
+    kConstIntBound{"FConstIntBound"};
+}  // namespace op_attr
+
 /*!
  * \brief Analyzer to get constant integer bound over expression.
  */

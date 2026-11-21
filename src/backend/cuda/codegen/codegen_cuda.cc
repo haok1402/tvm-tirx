@@ -479,7 +479,8 @@ void CodeGenCUDA::BindThreadIndex(const PrimVar& var, const ffi::String& thread_
     AddUtilFunction(func_name, "__forceinline__ __device__ unsigned int " + func_name +
                                    "() {\n"
                                    "  unsigned int ctaid;\n"
-                                   "  asm volatile(\"mov.u32 %0, %%" +
+                                   // Constant for the CTA's lifetime, so nvcc may CSE and hoist it.
+                                   "  asm(\"mov.u32 %0, %%" +
                                    sreg +
                                    ";\" : \"=r\"(ctaid) :);\n"
                                    "  return ctaid;\n"

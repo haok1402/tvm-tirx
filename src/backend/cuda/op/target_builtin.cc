@@ -29,10 +29,12 @@
 #include <tvm/ir/prim/op.h>
 #include <tvm/runtime/base.h>
 #include <tvm/runtime/memory_scope.h>
+#include <tvm/sym/analyzer.h>
 #include <tvm/tirx/op/attr.h>
 #include <tvm/tirx/type.h>
 
 #include <string>
+#include <unordered_map>
 
 namespace tvm {
 
@@ -70,6 +72,62 @@ void ValidateDeclTmem(const CallObj* call) {
   TVM_FFI_CHECK(ffi::StructuralEqual()(call->ty, inferred), TypeError)
       << "decl_tmem result must match its TensorType argument";
   TVM_FFI_CHECK(!call->attrs.has_value(), ValueError) << "decl_tmem does not accept attributes";
+}
+
+// Hardware limits of the CUDA launch indices, per axis x, y, z: grid dimensions up to
+// 2^31 - 1, 65535 and 65535; block dimensions up to 1024, 1024 and 64; at most 16 CTAs per
+// cluster. They give the analyzer a sign and a range for index arithmetic, e.g. so that
+// floordiv(block_idx, c) lowers to truncdiv without a negative-operand fix-up.
+constexpr int64_t kGridLimit[3] = {(int64_t{1} << 31) - 1, 65535, 65535};
+constexpr int64_t kBlockLimit[3] = {1024, 1024, 64};
+// Per-architecture assumption: at most 16 CTAs per cluster, the non-portable maximum of
+// sm_90 and sm_100 (8 is portable). FConstIntBound sees only the call, not the target, so the
+// cap cannot come from it; LaunchConfig enforces the same cap (MAX_CLUSTER_CTAS in
+// backend/cuda/launch/_impl.py) so that a TIRx launch never exceeds this bound. Raise both
+// together for an architecture with larger clusters.
+constexpr int64_t kClusterLimit = 16;
+
+ffi::Optional<sym::ConstIntBound> CudaRegisterBound(const std::string& name) {
+  // name is a PTX special register such as "ctaid.x" or "cluster_nctarank".
+  auto axis = [&]() -> int {
+    char last = name.empty() ? 0 : name.back();
+    return name.size() > 2 && name[name.size() - 2] == '.' && last >= 'x' && last <= 'z'
+               ? last - 'x'
+               : -1;
+  };
+  auto base = name.substr(0, name.rfind('.'));
+  int dim = axis();
+  if (dim >= 0) {
+    if (base == "tid") return sym::ConstIntBound(0, kBlockLimit[dim] - 1);
+    if (base == "ntid") return sym::ConstIntBound(1, kBlockLimit[dim]);
+    if (base == "ctaid" || base == "clusterid") return sym::ConstIntBound(0, kGridLimit[dim] - 1);
+    if (base == "nctaid" || base == "nclusterid") return sym::ConstIntBound(1, kGridLimit[dim]);
+    if (base == "cluster_ctaid") return sym::ConstIntBound(0, kClusterLimit - 1);
+    if (base == "cluster_nctaid") return sym::ConstIntBound(1, kClusterLimit);
+    return std::nullopt;
+  }
+  if (name == "laneid") return sym::ConstIntBound(0, 31);
+  if (name == "cluster_ctarank") return sym::ConstIntBound(0, kClusterLimit - 1);
+  if (name == "cluster_nctarank") return sym::ConstIntBound(1, kClusterLimit);
+  return std::nullopt;
+}
+
+ffi::Optional<sym::ConstIntBound> ConstIntBoundCudaAxis(const CallObj* call) {
+  static const std::unordered_map<std::string, std::string> registers = {
+      {"tirx.cuda.block_idx", "ctaid"},           {"tirx.cuda.thread_idx", "tid"},
+      {"tirx.cuda.cluster_id", "clusterid"},      {"tirx.cuda.cluster_cta_id", "cluster_ctaid"},
+      {"tirx.cuda.grid_dim", "nctaid"},           {"tirx.cuda.block_dim", "ntid"},
+      {"tirx.cuda.cluster_dim", "cluster_nctaid"}};
+  const auto* axis = call->args.empty() ? nullptr : call->args[0].as<StringImmObj>();
+  auto it = registers.find(std::string(call->op.as<OpObj>()->name));
+  if (!axis || it == registers.end()) return std::nullopt;
+  return CudaRegisterBound(it->second + "." + std::string(axis->value));
+}
+
+ffi::Optional<sym::ConstIntBound> ConstIntBoundMovSreg(const CallObj* call) {
+  const auto* name = call->args.size() > 1 ? call->args[1].as<StringImmObj>() : nullptr;
+  if (!name) return std::nullopt;
+  return CudaRegisterBound(std::string(name->value));
 }
 
 Type InferTypeCudaAxis(const CallObj* call) {
@@ -194,6 +252,7 @@ void RegisterDeviceIntrinsics() {
     RegisterDeviceIntrinsic(OpDef(std::string("tirx.cuda.") + name), CallEffectKind::kPure,
                             sig::arg<StringImm>("axis"))
         .set_native_fn_attr<&InferTypeCudaAxis>(tvm::op_attr::kInferType)
+        .set_native_fn_attr<&ConstIntBoundCudaAxis>(sym::op_attr::kConstIntBound)
         .expose();
   }
   for (const char* name : {"linear_thread_id", "warp_id", "lane_id", "warpgroup_id",
@@ -338,6 +397,7 @@ void RegisterDeviceIntrinsics() {
   RegisterDeviceIntrinsic(OpDef("tirx.cuda.mov_sreg"), CallEffectKind::kPure,
                           sig::arg<IntExpr>("bits"), sig::arg("reg_name"))
       .set_native_fn_attr<&InferTypeMovSreg>(tvm::op_attr::kInferType)
+      .set_native_fn_attr<&ConstIntBoundMovSreg>(sym::op_attr::kConstIntBound)
       .expose();
   RegisterDeviceIntrinsic(OpDef("tirx.cuda.nano_sleep"), CallEffectKind::kOpaque,
                           sig::arg<IntExpr>("time"))
