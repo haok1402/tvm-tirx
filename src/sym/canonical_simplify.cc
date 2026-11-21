@@ -1115,6 +1115,15 @@ bool CanonicalSimplifier::Impl::ProdDivSimplify(PrimExpr* plhs, PrimExpr* prhs,
   rhs_cscale /= cscale_gcd;
   // if no elimination is possible
   if (num_elimination == 0 && cscale_gcd == 1) return false;
+  // Each folded scale becomes a literal; give up if one does not fit its type.
+  auto fits = [](const ffi::BigInt& value, const PrimType& ty) {
+    bool is_signed = ty.MatchesCode(DLDataTypeCode::kDLInt);
+    ffi::BigInt limit = ffi::BigInt(1) << (ty.bits() - is_signed);
+    return value < limit && value >= (is_signed ? -limit : ffi::BigInt(0));
+  };
+  if (!fits(lhs_cscale, plhs->ty()) || !fits(rhs_cscale, rhs_ty) || !fits(cscale_gcd, rhs_ty)) {
+    return false;
+  }
 
   // construct prod via canonical form
   PrimType lhs_ty = plhs->ty();

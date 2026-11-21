@@ -491,6 +491,19 @@ def test_canonical_product_constants_exceeding_type():
     )
 
 
+def test_proddiv_scales_exceeding_type():
+    """ProdDivSimplify folds each side's literal factors; an overflowing scale disables it.
+
+    With unfolded factors (see test_canonical_product_constants_exceeding_type), dividing out
+    y would need the constant 65536 * 65536.
+    """
+    ck = CanonicalChecker()
+    x, y = tirx.Var("x", "int32"), tirx.Var("y", "int32")
+    c = tvm_tirx.ir.IntImm("int32", 65536)
+    expr = tirx.floordiv((x * y) * c * (x * c), y)
+    ck.verify(expr, expr)
+
+
 def test_proddiv_simplify():
     ck = CanonicalChecker()
     flm = tvm_tirx.tirx.floormod
