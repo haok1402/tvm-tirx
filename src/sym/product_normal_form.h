@@ -91,7 +91,14 @@ inline PrimExpr MulAndNormalize(const PrimExpr& lhs, const PrimExpr& rhs) {
   UnpackReduction<prim::MulObj>(lhs, fcollect);
   UnpackReduction<prim::MulObj>(rhs, fcollect);
   if (cscale != 1) {
-    res = res * IntImm(res.ty(), cscale);
+    PrimType ty = res.ty();
+    bool is_signed = ty.MatchesCode(DLDataTypeCode::kDLInt);
+    ffi::BigInt limit = ffi::BigInt(1) << (ty.bits() - is_signed);
+    if ((is_signed && cscale < -limit) || (!is_signed && cscale < 0) || cscale >= limit) {
+      // The folded constant does not fit the type; keep the factors unfolded.
+      return lhs * rhs;
+    }
+    res = res * IntImm(ty, cscale);
   }
   return res;
 }

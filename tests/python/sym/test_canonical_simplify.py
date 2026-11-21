@@ -470,6 +470,27 @@ def test_canonical_form_literals_exceeding_type():
     ck.verify(cast, cast)
 
 
+def test_canonical_product_constants_exceeding_type():
+    """Folding the literal factors of a product must not build an out-of-range literal.
+
+    Found by the differential fuzz: MulAndNormalize folded 1073741863 * -1048575 into one
+    int32 IntImm. The factors stay unfolded instead.
+    """
+    ck = CanonicalChecker()
+    x, y = tirx.Var("x", "int32"), tirx.Var("y", "int32")
+    c = lambda v: tvm_tirx.ir.IntImm("int32", v)  # noqa: E731
+    ck.verify(
+        tirx.Max(x + x, x - x) * c(1073741863) * (x * c(-1048575)),
+        tirx.Max(x, 0) * 2 * c(1073741863) * (x * c(-1048575)),
+    )
+    ck.verify(
+        tirx.truncdiv(
+            tirx.floordiv(y, 274) * c(268435455) * (x + c(268435457) + (c(-536870913) - x)), 184
+        ),
+        tirx.truncdiv(tirx.floordiv(y, 274) * c(268435455) * c(-268435456), 184),
+    )
+
+
 def test_proddiv_simplify():
     ck = CanonicalChecker()
     flm = tvm_tirx.tirx.floormod
