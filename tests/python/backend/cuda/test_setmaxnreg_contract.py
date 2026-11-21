@@ -73,6 +73,12 @@ def test_entry_registers_formula():
     assert entry_registers(256, 1, inc_targets=(232,)) == 232
     assert entry_registers(384, None, 168) == 168
     assert entry_registers(384) is None
+    # infeasible pins: ptxas ignores .minnctapersm (C7508) and drops setmaxnreg
+    assert entry_registers(384, 6) is None
+    assert entry_registers(640, 4) is None
+    assert entry_registers(1024, 3) is None
+    assert entry_registers(32, 33) is None
+    assert entry_registers(1024, 2) == 32
 
 
 @pytest.mark.parametrize("arch", ["sm_90a", "sm_100a"])
@@ -85,6 +91,32 @@ def test_unpinned_setmaxnreg_is_rejected(arch):
 @pytest.mark.parametrize("attrs", [{"min_blocks_per_sm": 1}, {"max_registers_per_thread": 168}])
 def test_pinned_setmaxnreg_compiles(arch, attrs):
     _compile(_ws_kernel(attrs=attrs), arch)
+
+
+@pytest.mark.parametrize("arch", ["sm_90a", "sm_100a"])
+@pytest.mark.parametrize("block, min_blocks", [(384, 6), (640, 4), (1024, 3)])
+def test_infeasible_min_blocks_is_rejected(arch, block, min_blocks):
+    with pytest.raises(SetMaxNRegContractError, match="cannot be resident"):
+        _compile(_ws_kernel(block, {"min_blocks_per_sm": min_blocks}), arch)
+
+
+@pytest.mark.parametrize("block, min_blocks", [(384, 5), (1024, 2), (256, 8)])
+def test_feasible_min_blocks_compiles(block, min_blocks):
+    _compile(_ws_kernel(block, {"min_blocks_per_sm": min_blocks}))
+
+
+@pytest.mark.parametrize("block, min_blocks", [(384, 6), (640, 4)])
+def test_infeasible_pin_really_drops_setmaxnreg(block, min_blocks, monkeypatch):
+    """What the check prevents: with the verifier bypassed, ptxas reports C7508 and SASS has no
+    SETMAXREG. Needs NVRTC, not a GPU."""
+    pytest.importorskip("cuda.bindings.nvrtc")
+    from tvm_tirx.backend.cuda import verify
+
+    monkeypatch.setattr(verify, "verify_setmaxnreg_launch_contract", lambda mod: None)
+    log, sass = _ptxas_log_and_sass(_ws_kernel(block, {"min_blocks_per_sm": min_blocks}), "sm_90a")
+    assert "C7508" in log
+    if sass:
+        assert "SETMAXREG" not in sass
 
 
 def test_kernels_without_setmaxnreg_are_unaffected():
