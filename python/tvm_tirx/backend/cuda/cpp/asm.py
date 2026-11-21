@@ -350,14 +350,54 @@ device_intrinsic(
 # =============================================================================
 
 
+# Special registers whose value is fixed for the lifetime of a CTA (PTX ISA, "Special
+# Registers"). Their reads are emitted without ``volatile`` so that nvcc can CSE and hoist
+# them, as it does for blockIdx/threadIdx. Registers that change during execution, such as
+# %clock, %globaltimer, %smid and %warpid, stay volatile.
+_CTA_CONSTANT_SREGS = frozenset(
+    [
+        "laneid",
+        "nwarpid",
+        "gridid",
+        "nsmid",
+        "is_explicit_cluster",
+        "cluster_ctarank",
+        "cluster_nctarank",
+        "total_smem_size",
+        "aggr_smem_size",
+        "dynamic_smem_size",
+        "lanemask_eq",
+        "lanemask_le",
+        "lanemask_lt",
+        "lanemask_ge",
+        "lanemask_gt",
+    ]
+    + [
+        f"{reg}.{axis}"
+        for reg in (
+            "tid",
+            "ntid",
+            "ctaid",
+            "nctaid",
+            "clusterid",
+            "nclusterid",
+            "cluster_ctaid",
+            "cluster_nctaid",
+        )
+        for axis in "xyz"
+    ]
+)
+
+
 def _cuda_mov_sreg_body(bits):
     spec = "l" if bits == 64 else "r"
 
     def _body(reg):
         reg = parse_str(reg)
+        qualifier = "asm" if reg in _CTA_CONSTANT_SREGS else "asm volatile"
         return (
             f"    uint{bits}_t x;\n"
-            f'    asm volatile("mov.u{bits} %0, %{reg};" : "={spec}"(x));\n'
+            f'    {qualifier}("mov.u{bits} %0, %{reg};" : "={spec}"(x));\n'
             f"    return (int{bits}_t)x;"
         )
 
