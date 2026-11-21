@@ -69,7 +69,9 @@ def test_ptx_setmaxnreg(inc):
     # fmt: off
     @T.function
     def func(A: T.Tensor(1, "float32")):
-        T.device_entry(launch=T.cuda.LaunchConfig(grid=1, block=128))
+        # setmaxnreg needs a pinned entry register count (else ptxas drops it, C7508).
+        T.device_entry(launch=T.cuda.LaunchConfig(grid=1, block=128),
+                       kernel_attrs=T.cuda.KernelAttributes(min_blocks_per_sm=1))
         cta_id = T.cuda.block_idx('x')
         tid = T.cuda.thread_idx('x')
         T.ptx[f"setmaxnreg.{'inc' if T.constexpr(inc) else 'dec'}.sync.aligned.u32"](32)
