@@ -174,8 +174,8 @@ def test_reassociated_exponent_is_ffma():
     assert fast.get("FFMA", 0) >= 1 and fast.get("FADD", 0) == 0, fast
 
 
-@pytest.mark.parametrize("dtype", ["int32", "int64"])
-def test_reassociation_leaves_integers(dtype):
+@pytest.mark.parametrize("dtype", ["int32", "int64", "float16", "bfloat16"])
+def test_reassociation_leaves_integers_and_narrow_floats(dtype):
     def kernel(reassociate):
         @T.function
         def main(a: T.Tensor((64,), dtype), out: T.Tensor((64,), dtype)):
@@ -187,8 +187,21 @@ def test_reassociation_leaves_integers(dtype):
 
         return main
 
-    # Integer arithmetic is exact, and the pass never touches it.
+    # Integer arithmetic is exact, and the pass never touches it. On f16 / bf16,
+    # a * c - b * c would cancel most of the significand, so the pass leaves those too.
     assert _compile(kernel(True))[1] == _compile(kernel(False))[1]
+
+
+def test_reassociation_rewrites_f64():
+    @T.function
+    def main(a: T.Tensor((64,), "float64"), out: T.Tensor((64,), "float64")):
+        T.func_attr({"tirx.float_reassociate": True})
+        T.device_entry(launch=T.cuda.LaunchConfig(grid=1, block=64))
+        tx = T.cuda.thread_idx("x")
+        out[tx] = (a[tx] - a[0]) * a[1]
+
+    _, body = _compile(main)
+    assert "- a_ptr[0]) * " not in body, body
 
 
 @pytest.mark.gpu

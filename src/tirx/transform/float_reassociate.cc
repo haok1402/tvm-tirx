@@ -22,14 +22,17 @@
  * \brief Opt-in floating-point distribution of a multiplier over a sum.
  *
  * With the function attribute or PassContext option ``tirx.float_reassociate`` set, rewrite
- * ``(a +- b) * c`` and ``c * (a +- b)`` on floating-point values into ``a * c +- b * c`` when
- * ``c`` is a constant, a variable or a load (cheap to repeat). The backend compiler can then
- * contract ``a * c +- (b * c)`` into one FMA and compute a shared ``b * c`` once: for the
- * softmax exponent ``exp2((s - m) * c)`` over many ``s`` with one row maximum ``m``, each
- * element costs one FFMA instead of FADD + FMUL.
+ * every ``(a +- b) * c`` and ``c * (a +- b)`` on f32 or f64 values in the function into
+ * ``a * c +- b * c`` when ``c`` is a constant, a variable or a load (cheap to repeat). The
+ * option is per function, not per expression. The backend compiler can then contract
+ * ``a * c +- (b * c)`` into one FMA and compute a shared ``b * c`` once: for the softmax
+ * exponent ``exp2((s - m) * c)`` over many ``s`` with one row maximum ``m``, each element
+ * costs one FFMA instead of FADD + FMUL.
  *
  * The rewrite changes rounding (it is a reassociation, not a contraction of the expression as
- * written), so it is off by default. It never applies to integers.
+ * written), so it is off by default. It never applies to integers, nor to f16 / bf16 (or other
+ * narrow floats): with an 8- or 11-bit significand, ``a * c - b * c`` for nearby ``a`` and ``b``
+ * cancels most of the precision that ``(a - b) * c`` keeps.
  */
 #include <tvm/ffi/reflection/registry.h>
 #include <tvm/ir/prim/op.h>
@@ -44,8 +47,10 @@ namespace tirx {
 
 namespace {
 
-bool IsFloat(const PrimExpr& e) {
-  return e.ty().MatchesCode(DLDataTypeCode::kDLFloat, DLDataTypeCode::kDLBfloat);
+// f32 / f64, scalar or vector. Narrower floats lose too much to cancellation.
+bool IsWideFloat(const PrimExpr& e) {
+  PrimType ty = e.ty();
+  return ty.MatchesCode(DLDataTypeCode::kDLFloat) && (ty.bits() == 32 || ty.bits() == 64);
 }
 
 // A multiplier that is cheap and safe to evaluate twice.
@@ -64,7 +69,7 @@ class FloatReassociator : public StmtExprMutator {
     PrimExpr result =
         StmtExprMutator::Mutate_(op, inplace_mode).ValueOrUnchanged(ffi::GetRef<PrimExpr>(op));
     const auto* mul = result.as<prim::MulObj>();
-    if (mul == nullptr || !IsFloat(result)) return result;
+    if (mul == nullptr || !IsWideFloat(result)) return result;
     PrimExpr distributed = Distribute(mul->a, mul->b);
     if (distributed.same_as(result)) return result;
     return distributed;

@@ -1457,7 +1457,20 @@ def FloatReassociate():
     contract each term into one FMA and compute a shared ``b * c`` once, e.g. the softmax
     exponent ``exp2((s - m) * c)`` becomes one FFMA per element. It changes rounding, so it
     runs only for functions with the attribute ``tirx.float_reassociate`` set, or under
-    ``PassContext(config={"tirx.float_reassociate": True})``. Integers are never rewritten.
+    ``PassContext(config={"tirx.float_reassociate": True})``.
+
+    The option is per function: it rewrites **every** such product in the function, not only
+    the softmax exponent. When ``a`` and ``b`` are close, ``a * c - b * c`` can lose most of
+    the precision that ``(a - b) * c`` keeps; write the hot expression in a separate function,
+    or by hand, if that matters elsewhere in the kernel.
+
+    Only f32 and f64 (scalar or vector) are rewritten. f16, bf16 and narrower floats are left
+    alone, because with their few significand bits the cancellation is severe. Integers are
+    never rewritten.
+
+    In TIRx script, put ``T.func_attr({"tirx.float_reassociate": True})`` before
+    ``T.device_entry(...)``. ``T.func_attr`` must be at the top of the function, and the
+    parser rejects it once ``device_entry`` has opened its frame.
 
     Returns
     -------

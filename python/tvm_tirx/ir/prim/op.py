@@ -1216,6 +1216,12 @@ def fmax(x1, x2, *, ty=None, loc: Location = UNKNOWN_LOC):
     ``__hmax2`` for half and bfloat16; ``llvm.maxnum`` on LLVM targets). The sign of a zero
     result for ``fmax(-0.0, +0.0)`` is unspecified.
 
+    On CUDA, the default backend flags include ``--use_fast_math``, which implies
+    ``-ftz=true``. f32 subnormal operands and results are therefore flushed to zero of the
+    same sign (``FMNMX.FTZ``), so e.g. ``fmax(1e-40, 0.0)`` returns ``0.0``. ``T.max`` and
+    all other f32 arithmetic flush the same way under those flags. f64, f16 and bf16 do not
+    flush.
+
     Parameters
     ----------
     x1, x2 : Expr
