@@ -27,6 +27,7 @@ from tvm_tirx.backend.cuda.perf_remarks import (
     PerfRemark,
     PerfRemarkError,
     TIRxPerfWarning,
+    collect_perf_remarks,
     parse_compiler_log,
     report_perf_remarks,
 )
@@ -153,6 +154,25 @@ def test_report_policy():
         report_perf_remarks((), "error")
     with pytest.raises(ValueError, match="perf_remarks"):
         report_perf_remarks(remarks, "loud")
+
+
+def test_collectors_nest_by_identity():
+    """Nested collectors are separate objects even when their contents are equal."""
+    remarks = parse_compiler_log(_SERIALIZED_LOG)
+    with collect_perf_remarks() as outer:
+        with collect_perf_remarks() as inner:  # equal (empty) contents, distinct collector
+            assert inner is not outer and inner.remarks == outer.remarks == []
+        report_perf_remarks(remarks, "ignore")
+        with collect_perf_remarks() as inner:
+            report_perf_remarks(remarks, "ignore")
+        assert inner.remarks == list(remarks)
+        assert outer.remarks == list(remarks) * 2
+        with pytest.raises(PerfRemarkError):
+            with collect_perf_remarks() as inner:
+                report_perf_remarks(remarks, "error")
+        assert inner.error is not None and outer.error is inner.error
+    report_perf_remarks(remarks, "ignore")  # nothing active: no error
+    assert len(outer.remarks) == 3 * len(remarks)
 
 
 def test_backend_config_validates_perf_remarks():
@@ -301,6 +321,19 @@ def test_error_mode_through_tvm_tirx_compile_is_structured():
     codes = {r.code for r in info.value.remarks}
     assert codes and all(code.startswith("C75") for code in codes)
     assert all(r.function == "main_kernel" and r.arch == "sm_90a" for r in info.value.remarks)
+
+
+@requires_nvrtc
+def test_user_collector_around_tvm_tirx_compile():
+    """A harness collecting a whole batch wraps tvm_tirx.compile, which opens its own
+    collector. The outer one must survive a clean compile and see a later hazard."""
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", TIRxPerfWarning)
+        with collect_perf_remarks() as batch:
+            clean = _tirx_compile(_wgmma_chain(hazard=False, k_steps=4))
+            hazard = _tirx_compile(_wgmma_chain(hazard=True))
+    assert clean.perf_remarks == ()
+    assert hazard.perf_remarks and batch.remarks == list(hazard.perf_remarks)
 
 
 @requires_nvrtc
