@@ -213,6 +213,32 @@ class MBarrier:
                 _map_addr_into_cta(self.buf.ptr_to([stage]), remote), pred, count
             )
 
+    def arrive_multicast(self, stage, ranks, pred=None, count=None):
+        """Arrive on slot ``stage`` of this barrier in every CTA of ``ranks``.
+
+        This is the consumer release of a multicast pipeline. When one TMA load
+        is multicast to several CTAs, each consumer must release the slot in
+        every CTA that received it, not only its own. A typical Hopper
+        consumer, after ``wgmma.wait_group`` retires the last MMA that read the
+        stage::
+
+            with T.cuda.elect_one():  # or any single thread per consumer warpgroup
+                pipe.empty.arrive_multicast(stage, ranks=range(cluster_size))
+
+        Initialize the barrier with an arrival count of
+        ``len(ranks) x arriving threads per CTA``. ``ranks`` is a trace-time
+        sequence of CTA ranks in the cluster. Each rank costs one ``mapa`` and
+        one ``mbarrier.arrive.shared::cluster``; the own rank included, so the
+        count is uniform.
+        """
+        if self._remote_cta_id is not None:
+            raise ValueError("arrive_multicast() is not available on a remote_view()")
+        ranks = list(ranks)
+        if not ranks:
+            raise ValueError("arrive_multicast() needs at least one CTA rank")
+        for rank in ranks:
+            self.arrive(stage, remote=rank, pred=pred, count=count)
+
     @T.inline
     def _arrive(self, bar, pred=None, count=None):
         if T.constexpr(pred is None):

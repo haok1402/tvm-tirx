@@ -16,4 +16,4 @@
 # under the License.
 """CUDA runtime extensions of TIRx."""
 
-from . import locality_domain
+from . import locality_domain, occupancy
