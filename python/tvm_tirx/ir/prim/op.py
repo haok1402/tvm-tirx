@@ -564,12 +564,21 @@ def vscale(*, ty=None, loc: Location = UNKNOWN_LOC):
 
 
 def min(a, b, loc: Location = UNKNOWN_LOC):
-    """Elementwise minimum of two primitive expressions."""
+    """Elementwise minimum of two primitive expressions.
+
+    On floats, a NaN operand propagates to the result; see :func:`fmin` for the
+    NaN-ignoring, single-instruction form.
+    """
     return _ffi_api._OpMin(a, b, loc)
 
 
 def max(a, b, loc: Location = UNKNOWN_LOC):
-    """Elementwise maximum of two primitive expressions."""
+    """Elementwise maximum of two primitive expressions.
+
+    On floats, a NaN operand propagates to the result. On CUDA f32 that costs three
+    instructions (compare, NaN test, select); :func:`fmax` is the NaN-ignoring,
+    single-instruction form.
+    """
     return _ffi_api._OpMax(a, b, loc)
 
 
@@ -1185,6 +1194,39 @@ def hypot(x1, x2, *, ty=None, loc: Location = UNKNOWN_LOC):
     x1 = convert(x1)
     x2 = convert(x2)
     return _call_prim("prim.hypot", x1, x2, loc=loc, ty=ty)  # type: ignore
+
+
+def _float_min_max(name, x1, x2, ty, loc):
+    x1, x2 = convert(x1), convert(x2)
+    for x in (x1, x2):
+        dtype = str(x.ty.dtype)
+        if not dtype.startswith(("float", "bfloat")):
+            raise TypeError(
+                f"{name} takes floating-point operands, got {dtype}; use T.{name[1:]} for integers"
+            )
+    return _call_prim(f"prim.{name}", x1, x2, loc=loc, ty=ty)
+
+
+def fmax(x1, x2, *, ty=None, loc: Location = UNKNOWN_LOC):
+    """NaN-ignoring float maximum (IEEE 754 maxNum).
+
+    Returns the larger operand; if exactly one operand is NaN, returns the other. ``T.max``
+    instead propagates NaN, which costs three instructions on CUDA f32 (compare, NaN test,
+    select); ``fmax`` lowers to one (``fmaxf`` / PTX ``max.f32`` / SASS ``FMNMX``; ``__hmax`` /
+    ``__hmax2`` for half and bfloat16; ``llvm.maxnum`` on LLVM targets). The sign of a zero
+    result for ``fmax(-0.0, +0.0)`` is unspecified.
+
+    Parameters
+    ----------
+    x1, x2 : Expr
+        Floating-point operands of the same type.
+    """
+    return _float_min_max("fmax", x1, x2, ty, loc)
+
+
+def fmin(x1, x2, *, ty=None, loc: Location = UNKNOWN_LOC):
+    """NaN-ignoring float minimum (IEEE 754 minNum); see :func:`fmax`."""
+    return _float_min_max("fmin", x1, x2, ty, loc)
 
 
 def copysign(x1, x2, *, ty=None, loc: Location = UNKNOWN_LOC):

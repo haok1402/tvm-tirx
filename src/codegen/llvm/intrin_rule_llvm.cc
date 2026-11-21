@@ -99,6 +99,14 @@ TVM_FFI_STATIC_INIT_BLOCK() {
       .set_attr<FLowerIntrinsic>("llvm.FLowerIntrinsic",
                                  DispatchLLVMPureIntrin<::llvm::Intrinsic::nearbyint, 1>);
 
+  OpDef("prim.fmax")
+      .set_attr<FLowerIntrinsic>("llvm.FLowerIntrinsic",
+                                 DispatchLLVMPureIntrin<::llvm::Intrinsic::maxnum, 2>);
+
+  OpDef("prim.fmin")
+      .set_attr<FLowerIntrinsic>("llvm.FLowerIntrinsic",
+                                 DispatchLLVMPureIntrin<::llvm::Intrinsic::minnum, 2>);
+
   OpDef("prim.pow")
       .set_attr<FLowerIntrinsic>("llvm.FLowerIntrinsic",
                                  DispatchLLVMPureIntrin<::llvm::Intrinsic::pow, 2>);

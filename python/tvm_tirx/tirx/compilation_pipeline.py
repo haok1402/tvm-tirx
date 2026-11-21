@@ -80,6 +80,8 @@ def tirx_pipeline(*, prepare_only=False, target=None):
             tirx.transform.VectorizeLoop(not bool(config.get("tirx.disable_vectorize", False))),
             tirx.transform.UnrollLoop(),
             tirx.transform.StmtSimplify(),
+            # After the last simplification, which could factor the distributed terms back.
+            tirx.transform.FloatReassociate(),
         ]
         if not bool(config.get("tirx.disable_cse_tir", False)):
             passes.append(tirx.transform.CommonSubexprElim())

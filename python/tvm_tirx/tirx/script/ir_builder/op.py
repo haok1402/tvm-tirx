@@ -370,6 +370,12 @@ bitwise_xor = _auto_emit_void_call(_tir_op.bitwise_xor)
 copysign = _auto_emit_void_call(_tir_op.copysign)
 
 
+fmax = _auto_emit_void_call(_tir_op.fmax)
+
+
+fmin = _auto_emit_void_call(_tir_op.fmin)
+
+
 cos = _auto_emit_void_call(_tir_op.cos)
 
 
@@ -822,6 +828,8 @@ __all__ = [
     "floordiv",
     "floormod",
     "fma",
+    "fmax",
+    "fmin",
     "fmod",
     "free_workspace",
     "gpu_active_thread_selector",

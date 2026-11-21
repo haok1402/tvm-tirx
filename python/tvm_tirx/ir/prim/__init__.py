@@ -86,6 +86,8 @@ from .op import (
     floordiv,
     floormod,
     fma,
+    fmax,
+    fmin,
     fmod,
     hypot,
     if_then_else,

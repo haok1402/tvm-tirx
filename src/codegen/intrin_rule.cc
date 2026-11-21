@@ -123,6 +123,12 @@ TVM_FFI_STATIC_INIT_BLOCK() {
   OpDef("prim.nextafter")
       .set_attr<FLowerIntrinsic>("default.FLowerIntrinsic", DispatchPureExtern<FloatSuffix>);
 
+  OpDef("prim.fmax")
+      .set_attr<FLowerIntrinsic>("default.FLowerIntrinsic", DispatchPureExtern<FloatSuffix>);
+
+  OpDef("prim.fmin")
+      .set_attr<FLowerIntrinsic>("default.FLowerIntrinsic", DispatchPureExtern<FloatSuffix>);
+
   OpDef("prim.copysign")
       .set_attr<FLowerIntrinsic>("default.FLowerIntrinsic", DispatchPureExtern<FloatSuffix>);
 

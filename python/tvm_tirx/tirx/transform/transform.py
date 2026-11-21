@@ -1448,3 +1448,20 @@ def LowerTensorLayouts():
         tvm.ir.assert_structural_equal(run_pass(), tr.BindTarget(target)(Expected))
     """
     return _ffi_api.LowerTensorLayouts()  # type: ignore
+
+
+def FloatReassociate():
+    """Opt-in float distribution ``(a +- b) * c -> a * c +- b * c``.
+
+    Applies when ``c`` is a constant, a variable or a load, so the backend compiler can
+    contract each term into one FMA and compute a shared ``b * c`` once, e.g. the softmax
+    exponent ``exp2((s - m) * c)`` becomes one FFMA per element. It changes rounding, so it
+    runs only for functions with the attribute ``tirx.float_reassociate`` set, or under
+    ``PassContext(config={"tirx.float_reassociate": True})``. Integers are never rewritten.
+
+    Returns
+    -------
+    fpass : tvm_tirx.ir.transform.Pass
+        The result pass
+    """
+    return _ffi_api.FloatReassociate()  # type: ignore

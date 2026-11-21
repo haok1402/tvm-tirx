@@ -244,6 +244,17 @@ TVM_TIRX_DLL Pass NarrowDataType(int target_bits);
 TVM_TIRX_DLL Pass ForceNarrowIndexToInt32();
 
 /*!
+ * \brief Opt-in floating-point distribution: (a +- b) * c -> a * c +- b * c for a constant,
+ *  variable or load c, so the backend can contract each term into an FMA and share b * c.
+ *
+ *  Enabled per function by the attribute ``tirx.float_reassociate`` or globally by the
+ *  PassContext option of the same name. It changes rounding, so it is off by default.
+ *
+ * \return The pass.
+ */
+TVM_TIRX_DLL Pass FloatReassociate();
+
+/*!
  * \brief Legalize bf16 compute Ops. Add a cast to fp32
  *   before Ops, then add a cast back to bf16.
  * \return The pass.
