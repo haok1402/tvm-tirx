@@ -38,6 +38,10 @@ class Executable:
         """Initialize the Executable object."""
         self.mod: Module = mod
         self._jitted_mod: Module | None = None
+        # ptxas performance remarks of the CUDA device compiles that produced this
+        # executable (tvm_tirx.backend.cuda.perf_remarks.PerfRemark), set by
+        # tvm_tirx.compile. Empty for other targets or source-only builds.
+        self.perf_remarks: tuple = ()
 
     def __getitem__(self, name: str) -> Function:
         """Get the Function from the jitted module."""
