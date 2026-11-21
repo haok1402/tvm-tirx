@@ -59,18 +59,25 @@ _OPS = {
 }
 
 
-def _evaluate(expr, env, wrap):
+def _evaluate(expr, env, wrap, limit=2**31):
+    """Evaluate expr exactly, or with int32 wrap-around when wrap is set.
+
+    Exact evaluation rejects (raises _Invalid) any intermediate outside int32, or with a
+    magnitude of limit or more when a smaller domain limit is given.
+    """
     kind = type(expr).__name__
     if kind == "Var":
         return env[expr.name]
     if kind == "IntImm":
         return int(expr.value)
     if kind == "Cast":
-        return _evaluate(expr.value, env, wrap)
-    a, b = _evaluate(expr.a, env, wrap), _evaluate(expr.b, env, wrap)
+        return _evaluate(expr.value, env, wrap, limit)
+    a, b = _evaluate(expr.a, env, wrap, limit), _evaluate(expr.b, env, wrap, limit)
     if kind in ("FloorDiv", "FloorMod", "Div", "Mod") and b == 0:
         raise ZeroDivisionError(str(expr))
     value = _OPS[kind](a, b)
+    if not wrap and limit < 2**31 and not -limit < value < limit:
+        raise _Invalid()
     if not INT32_MIN <= value <= INT32_MAX:
         if not wrap:
             raise _Invalid()
@@ -81,14 +88,28 @@ def _evaluate(expr, env, wrap):
 def _expressions(seed, count, limit=2**31):
     """Random expressions with the points where they are evaluated.
 
-    Points draw x from [-limit, limit) half of the time and y a quarter of the time, else small.
+    With the default limit, points draw x anywhere in int32 half of the time, else small, and
+    keep the points where every exact intermediate fits int32. With a domain limit, constants
+    have a magnitude below limit, points favor values near +-limit, and every exact
+    intermediate must have a magnitude below limit.
     """
     rng = random.Random(seed)
     x, y = tirx.Var("x", "int32"), tirx.Var("y", "int32")
+    large = (
+        LARGE if limit >= 2**31 else [v for v in LARGE if v < limit] + [limit - 1, limit // 2 + 1]
+    )
 
     def constant():
-        value = rng.choice(LARGE) if rng.random() < 0.5 else rng.randint(1, 300)
+        value = rng.choice(large) if rng.random() < 0.5 else rng.randint(1, 300)
         return value if rng.random() < 0.7 else -value
+
+    def domain_value():
+        kind = rng.random()
+        if kind < 0.4:
+            return rng.randint(-limit + 1, limit - 1)
+        if kind < 0.7:
+            return rng.choice([-1, 1]) * (limit - rng.randint(1, 2000))
+        return rng.randint(-5000, 5000)
 
     def divisor():
         return ir.IntImm("int32", abs(constant()))
@@ -119,21 +140,22 @@ def _expressions(seed, count, limit=2**31):
 
     for _ in range(count):
         expr = generate(rng.randint(2, 4))
-        points = [
-            {
-                "x": rng.randint(-limit, limit - 1)
-                if rng.random() < 0.5
-                else rng.randint(-5000, 5000),
-                "y": rng.randint(-limit, limit - 1)
-                if limit < 2**31 and rng.random() < 0.25
-                else rng.randint(-5000, 5000),
-            }
-            for _ in range(24)
-        ]
+        if limit >= 2**31:
+            points = [
+                {
+                    "x": rng.randint(INT32_MIN, INT32_MAX)
+                    if rng.random() < 0.5
+                    else rng.randint(-5000, 5000),
+                    "y": rng.randint(-5000, 5000),
+                }
+                for _ in range(24)
+            ]
+        else:
+            points = [{"x": domain_value(), "y": domain_value()} for _ in range(24)]
         cases = []
         for point in points:
             try:
-                cases.append((point, _evaluate(expr, point, wrap=False)))
+                cases.append((point, _evaluate(expr, point, wrap=False, limit=limit)))
             except _Invalid:
                 pass
         if cases:
@@ -162,12 +184,14 @@ def test_simplified_value_matches_exact_value(method):
 
 @pytest.mark.parametrize("method", ["rewrite_simplify", "canonical_simplify", "simplify"])
 def test_index_domain_values_are_exact(method):
-    """Within the int32 index domain |v| < 2^30, every simplified value is exact.
+    """In the int32 index domain, every simplified value is exact.
 
-    Rewrites may form a sum or difference of two terms that the input never computed, e.g.
-    min(c, x) - x -> min(c - x, 0); such a term can overflow only for values of 2^30 or more.
-    An in-bounds index of a tensor with at most 2^30 elements is in this domain; larger tensors
-    are indexed in int64 (LowerTensorLayouts).
+    The domain: every constant, and every intermediate value of the input expression, has a
+    magnitude below 2^30. A rewrite forms a new term as the sum or difference of two existing
+    subexpressions, e.g. min(c, x) - x -> min(c - x, 0) or max(a, b) + c -> max(a + c, b + c),
+    so one rewrite step stays within int32 there. Chains of steps are not proven; this test
+    checks them. An in-bounds index of a tensor with at most 2^30 elements, written as a sum of
+    non-negative terms, is in this domain; larger tensors are indexed in int64.
     """
     mismatches = []
     for expr, cases in _expressions(seed=20261122, count=1500, limit=2**30):
@@ -184,3 +208,50 @@ def test_index_domain_values_are_exact(method):
                 mismatches.append(f"{expr} -> {simplified} at {point}: {actual} != {expected}")
                 break
     assert not mismatches, "\n".join(mismatches[:10])
+
+
+_X, _Y = tirx.Var("x", "int32"), tirx.Var("y", "int32")
+_BOUNDARY_CASES = {
+    # min(c, x) - x -> min(c - x, 0): c - x is a new term.
+    "min_minus_inside": (tirx.Min(ir.IntImm("int32", 2**30 - 1), _X) - _X, {"x": -(2**30) + 1}),
+    "min_minus_constant_outside": (
+        tirx.Min(ir.IntImm("int32", 2**30 + 1), _X) - _X,
+        {"x": -(2**30) + 1},
+    ),
+    # x + max(y + x, c - x) -> max(y + x + x, c): (y + x) + x is a new term.
+    "max_plus_inside": (
+        _X + tirx.Max(_Y + _X, ir.IntImm("int32", 203) - _X),
+        {"x": -(2**29) + 100, "y": -(2**29) + 100},
+    ),
+    "max_plus_intermediate_outside": (
+        _X + tirx.Max(_Y + _X, ir.IntImm("int32", 203) - _X),
+        {"x": -(2**30) + 100, "y": -(2**30) + 100},
+    ),
+}
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        "min_minus_inside",
+        pytest.param(
+            "min_minus_constant_outside",
+            marks=pytest.mark.xfail(
+                strict=True, reason="out of contract: the constant 2^30 + 1 is outside the domain"
+            ),
+        ),
+        "max_plus_inside",
+        pytest.param(
+            "max_plus_intermediate_outside",
+            marks=pytest.mark.xfail(
+                strict=True,
+                reason="out of contract: the input intermediate y + x is -2^31 + 200",
+            ),
+        ),
+    ],
+)
+def test_index_domain_boundary(case):
+    """At the domain boundary: exact inside, and a known wrong value just outside."""
+    expr, point = _BOUNDARY_CASES[case]
+    simplified = Analyzer().rewrite_simplify(expr)
+    assert _evaluate(simplified, point, wrap=True) == _evaluate(expr, point, wrap=False)
