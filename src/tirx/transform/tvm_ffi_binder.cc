@@ -786,11 +786,13 @@ Expr TVMFFIABIBuilder::DecodeParamDLTensor(const TensorVar& tensor, const PrimEx
   // A symbolic shape with 32-bit dimensions keeps 32-bit index arithmetic, which is valid only
   // for spans of at most 2^30 elements (see LowerTensorLayouts and NarrowDataType). Check it here.
   if (transform::PassContext::Current()->GetConfig<bool>("tirx.enable_debug").value_or(false)) {
-    bool symbolic = false, narrow = false;
+    // The flat index stays 32-bit only when every dimension is; one int64 dimension makes the
+    // offset arithmetic int64.
+    bool symbolic = false, narrow = true;
     for (const auto& extent : tensor.shape()) {
       PrimExpr dim = extent.as_or_throw<PrimExpr>();
       if (!dim.as<IntImmObj>()) symbolic = true;
-      if (dim.ty().bits() < 64) narrow = true;
+      if (dim.ty().bits() >= 64) narrow = false;
     }
     if (symbolic && narrow) {
       PrimExpr span = prim::MakeConst(PrimType::Float(64), 1.0);

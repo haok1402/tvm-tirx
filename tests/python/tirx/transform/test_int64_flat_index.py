@@ -119,5 +119,38 @@ def test_debug_checks_symbolic_int32_span():
         mod(large)
 
 
+def _symbolic_fill_dims(m_dtype, n):
+    """A fill kernel over (m, n): m symbolic of m_dtype; n a symbolic dtype name or an int."""
+    m = T.dynamic("m", m_dtype)
+    n = T.dynamic("n", n) if isinstance(n, str) else n
+
+    @T.function
+    def main(A: T.Tensor((m, n), "int8")):
+        T.device_entry(launch=T.cuda.LaunchConfig(grid=T.Cast("int32", m), block=256))
+        bx = T.cuda.block_idx("x")
+        tx = T.cuda.thread_idx("x")
+        for j in T.serial(n // 256):
+            A[bx, j * 256 + tx] = T.Cast("int8", bx % 100)
+
+    return main
+
+
+@pytest.mark.gpu
+@pytest.mark.skipif(not env.has_cuda(), reason="needs a CUDA GPU")
+@pytest.mark.parametrize("m_dtype, n", [("int64", 8192), ("int32", "int64")])
+def test_debug_check_skips_int64_indexed_shapes(m_dtype, n):
+    """One int64 dimension makes the flat index int64, so the int32 span check does not apply."""
+    mod, src = _compile(
+        _symbolic_fill_dims(m_dtype, n), arch=env.cuda_arch(), config={"tirx.enable_debug": True}
+    )
+    assert "int64_t" in _store_index(src)
+    M, N = 262145, 8192  # 2^31 + 2^13 elements
+    A = tvm_tirx.runtime.empty((M, N), "int8", device=tvm_tirx.cuda(0))
+    mod(A)
+    out = A.numpy()
+    for bx in (0, 262143, 262144):
+        assert (out[bx] == bx % 100).all(), bx
+
+
 if __name__ == "__main__":
     tvm_tirx.testing.main()
