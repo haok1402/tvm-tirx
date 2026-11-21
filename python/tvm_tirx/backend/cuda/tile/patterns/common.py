@@ -143,6 +143,7 @@ class Context:
                 "tirx.cuda.thread_in_warpgroup",
                 "tirx.cuda.warp_in_warpgroup",
                 "tirx.cuda.warpgroup_id",
+                "tirx.cuda.broadcast_warpgroup_id",
             ):
                 thread = axis("threadIdx.", "x") + axis("threadIdx.", "x", True) * (
                     axis("threadIdx.", "y")
@@ -155,6 +156,7 @@ class Context:
                     "tirx.cuda.thread_in_warpgroup": thread % 128,
                     "tirx.cuda.warp_in_warpgroup": thread // 32 % 4,
                     "tirx.cuda.warpgroup_id": thread // 128,
+                    "tirx.cuda.broadcast_warpgroup_id": thread // 128,
                 }[name]
             return call
 

@@ -142,7 +142,7 @@ class CudaIndexLowerer : public StmtExprMutator {
     }
     auto result = lowerer->Mutate(body).ValueOrUnchanged(body);
     ffi::Array<Stmt> prefix;
-    if (lowerer->needs_warp_) {
+    if (lowerer->needs_warp_ || lowerer->needs_block_size_check_) {
       int64_t threads = 1;
       for (int axis = 0; axis < 3; ++axis) {
         auto extent = lowerer->BlockDimension(axis).as<IntImmObj>();
@@ -154,6 +154,8 @@ class CudaIndexLowerer : public StmtExprMutator {
       }
       TVM_FFI_CHECK(threads % 32 == 0, ValueError)
           << "Warp indices require a block size divisible by 32";
+    }
+    if (lowerer->needs_warp_) {
       prefix.push_back(Bind(
           lowerer->warp_,
           Call(PrimType::Int(32), tirx::gpu_warp_shuffle_op(),
@@ -216,6 +218,15 @@ class CudaIndexLowerer : public StmtExprMutator {
     if (name == "linear_thread_id") return LinearThread();
     if (name == "lane_id") return prim::FloorMod(LinearThread(), 32);
     if (name == "thread_in_warpgroup") return prim::FloorMod(LinearThread(), 128);
+    if (name == "broadcast_warpgroup_id") {
+      // The caller guarantees warp convergence here (see the op's contract).
+      needs_block_size_check_ = true;
+      return Call(PrimType::Int(32), tirx::gpu_warp_shuffle_op(),
+                  {IntImm(PrimType::UInt(32), 0xffffffff),
+                   prim::FloorDiv(LinearThread(), IntImm::Int32(128)), IntImm::Int32(0),
+                   IntImm::Int32(32), IntImm::Int32(32)})
+          .as_or_throw<PrimExpr>();
+    }
     if (name == "warp_id" || name == "warpgroup_id" || name == "warp_in_warpgroup") {
       needs_warp_ = true;
       if (name == "warp_id") return warp_;
@@ -236,6 +247,8 @@ class CudaIndexLowerer : public StmtExprMutator {
   CudaLaunchParams params_;
   PrimVar warp_{"warp_id_in_cta", PrimType::Int(32)};
   bool needs_warp_{false};
+  // Whether a warp-level index without the entry binding needs the static block-size check.
+  bool needs_block_size_check_{false};
 };
 
 }  // namespace
