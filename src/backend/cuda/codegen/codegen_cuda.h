@@ -99,6 +99,9 @@ class CodeGenCUDA final : public CodeGenC {
   void Dispatch_(const prim::GTObj* op, std::ostream& os) final;
   void Dispatch_(const prim::GEObj* op, std::ostream& os) final;
   void Dispatch_(const prim::MinObj* op, std::ostream& os) final;  // NOLINT(*)
+  void Dispatch_(const prim::AndObj* op, std::ostream& os) final;  // NOLINT(*)
+  void Dispatch_(const prim::OrObj* op, std::ostream& os) final;   // NOLINT(*)
+  bool IsSafeToSpeculate(const PrimExpr& e) const;
   void Dispatch_(const prim::MaxObj* op, std::ostream& os) final;  // NOLINT(*)
   template <typename T>
   void PrintMinMaxNanPreservingImpl(const T* op, const char* opstr, std::ostream& os);
@@ -154,6 +157,9 @@ class CodeGenCUDA final : public CodeGenC {
   std::unordered_map<int, int> barrier_count_;
   // Functions to be added to the util functions during codegen
   std::unordered_map<std::string, std::string> util_funcs_;
+  // Element counts of the per-thread (local scope) arrays declared in the current function. A
+  // load from one at a constant in-range index reads a register and cannot fault.
+  std::unordered_map<const VarObj*, int64_t> local_array_size_;
 
   // The name prefix of the cuda::barrier array in shared memory
   const std::string cuda_barrier_name_ = "cubar";

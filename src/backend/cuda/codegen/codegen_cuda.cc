@@ -39,6 +39,7 @@
 
 #include <cmath>
 #include <iomanip>
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
@@ -256,6 +257,7 @@ class ThreadIdxExtractor : public tirx::StmtExprVisitor {
 
 void CodeGenCUDA::InitFuncState(const Function& func) {
   CodeGenC::InitFuncState(func);
+  local_array_size_.clear();
   min_blocks_per_sm_.reset();
   max_blocks_per_cluster_.reset();
   max_registers_per_thread_.reset();
@@ -831,6 +833,113 @@ void CodeGenCUDA::Dispatch_(const prim::DivObj* op, std::ostream& os) {
 void CodeGenCUDA::Dispatch_(const prim::ModObj* op, std::ostream& os) {
   CheckBinaryOpSupported(op);
   CodeGenC::Dispatch_(op, os);
+}
+
+// Whether evaluating `e` unconditionally is as safe as evaluating it behind a C `&&` / `||`
+// guard: it has no side effect, and nothing in it can fault or be undefined for operand values
+// that the guard might have excluded. Allowed: constants, variables, arithmetic, comparisons,
+// casts, selects, division and remainder by a constant other than 0 and -1, shifts by an in-range
+// constant, pure calls, and loads from a per-thread array at a constant in-range index.
+bool CodeGenCUDA::IsSafeToSpeculate(const PrimExpr& e) const {
+  auto const_int = [](const PrimExpr& x) -> std::optional<int64_t> {
+    const auto* imm = x.as<IntImmObj>();
+    return imm ? imm->value.as<int64_t>() : std::nullopt;
+  };
+  auto both = [this](const auto* op) {
+    return IsSafeToSpeculate(op->a) && IsSafeToSpeculate(op->b);
+  };
+  if (e.as<IntImmObj>() || e.as<FloatImmObj>() || e.as<VarObj>()) return true;
+  if (const auto* op = e.as<prim::AddObj>()) return both(op);
+  if (const auto* op = e.as<prim::SubObj>()) return both(op);
+  if (const auto* op = e.as<prim::MulObj>()) return both(op);
+  if (const auto* op = e.as<prim::MinObj>()) return both(op);
+  if (const auto* op = e.as<prim::MaxObj>()) return both(op);
+  if (const auto* op = e.as<prim::EQObj>()) return both(op);
+  if (const auto* op = e.as<prim::NEObj>()) return both(op);
+  if (const auto* op = e.as<prim::LTObj>()) return both(op);
+  if (const auto* op = e.as<prim::LEObj>()) return both(op);
+  if (const auto* op = e.as<prim::GTObj>()) return both(op);
+  if (const auto* op = e.as<prim::GEObj>()) return both(op);
+  if (const auto* op = e.as<prim::AndObj>()) return both(op);
+  if (const auto* op = e.as<prim::OrObj>()) return both(op);
+  if (const auto* op = e.as<prim::BitwiseAndObj>()) return both(op);
+  if (const auto* op = e.as<prim::BitwiseOrObj>()) return both(op);
+  if (const auto* op = e.as<prim::BitwiseXorObj>()) return both(op);
+  if (const auto* op = e.as<prim::NotObj>()) return IsSafeToSpeculate(op->a);
+  if (const auto* op = e.as<prim::BitwiseNotObj>()) return IsSafeToSpeculate(op->a);
+  if (const auto* op = e.as<prim::CastObj>()) return IsSafeToSpeculate(op->value);
+  if (const auto* op = e.as<prim::SelectObj>()) {
+    return IsSafeToSpeculate(op->condition) && IsSafeToSpeculate(op->true_value) &&
+           IsSafeToSpeculate(op->false_value);
+  }
+  auto safe_division = [&](const auto* op) {
+    PrimType ty = op->ty.template as_or_throw<PrimType>();
+    if (!ty.MatchesCode(DLDataTypeCode::kDLInt, DLDataTypeCode::kDLUInt)) return both(op);
+    auto divisor = const_int(op->b);
+    return divisor && *divisor != 0 && *divisor != -1 && IsSafeToSpeculate(op->a);
+  };
+  if (const auto* op = e.as<prim::DivObj>()) return safe_division(op);
+  if (const auto* op = e.as<prim::ModObj>()) return safe_division(op);
+  auto safe_shift = [&](const auto* op) {
+    auto amount = const_int(op->b);
+    int bits = op->ty.template as_or_throw<PrimType>().bits();
+    return amount && *amount >= 0 && *amount < bits && IsSafeToSpeculate(op->a);
+  };
+  if (const auto* op = e.as<prim::LShiftObj>()) return safe_shift(op);
+  if (const auto* op = e.as<prim::RShiftObj>()) return safe_shift(op);
+  if (const auto* op = e.as<TensorLoadObj>()) {
+    const auto* source = op->source.as<VarObj>();
+    auto it = source ? local_array_size_.find(source) : local_array_size_.end();
+    if (it == local_array_size_.end() || op->indices.size() != 1 ||
+        op->ty.as_or_throw<PrimType>().lanes() != 1) {
+      return false;
+    }
+    auto index = const_int(op->indices[0]);
+    return index && *index >= 0 && *index < it->second;
+  }
+  if (const auto* op = e.as<CallObj>()) {
+    static auto effects = Op::GetAttrMap(tvm::op_attr::kCallEffectKind);
+    if (!op->op.as<Op>() || effects.get(op->op, CallEffectKind::kOpaque) != CallEffectKind::kPure) {
+      return false;
+    }
+    for (const Expr& arg : op->args) {
+      if (arg.as<StringImmObj>()) continue;
+      auto prim_arg = arg.as<PrimExpr>();
+      if (!prim_arg || !IsSafeToSpeculate(prim_arg.value())) return false;
+    }
+    return true;
+  }
+  return false;
+}
+
+// A scalar And / Or whose operands are both safe to evaluate unconditionally is printed with the
+// non-short-circuit `&` / `|`, as the LLVM backend lowers it. `&&` / `||` hand NVRTC a branch to
+// lower; for a per-register mask such as `(a || b) ? -inf : x` it can keep one divergent branch
+// region per statement instead of a predicated select (sm90-probe ISSUE-017).
+void CodeGenCUDA::Dispatch_(const prim::AndObj* op, std::ostream& os) {
+  if (op->ty.as_or_throw<PrimType>().lanes() == 1 && IsSafeToSpeculate(op->a) &&
+      IsSafeToSpeculate(op->b)) {
+    os << '(';
+    PrintExpr(op->a, os);
+    os << " & ";
+    PrintExpr(op->b, os);
+    os << ')';
+  } else {
+    CodeGenC::Dispatch_(op, os);
+  }
+}
+
+void CodeGenCUDA::Dispatch_(const prim::OrObj* op, std::ostream& os) {
+  if (op->ty.as_or_throw<PrimType>().lanes() == 1 && IsSafeToSpeculate(op->a) &&
+      IsSafeToSpeculate(op->b)) {
+    os << '(';
+    PrintExpr(op->a, os);
+    os << " | ";
+    PrintExpr(op->b, os);
+    os << ')';
+  } else {
+    CodeGenC::Dispatch_(op, os);
+  }
 }
 
 void CodeGenCUDA::Dispatch_(const prim::EQObj* op, std::ostream& os) {
@@ -1533,6 +1642,10 @@ void CodeGenCUDA::DispatchAllocTensor(const BindObj* op, const CallObj* buffer_c
       constant_size = constant_size / (32 / dtype.bits);
     }
     stream << ' ' << vid << '[' << constant_size << "];\n";
+    static const auto scope_local = runtime::MemoryScope::Get("local");
+    if (scope == scope_local) {
+      local_array_size_[buffer.get()] = static_cast<int64_t>(constant_size);
+    }
   }
 
   RegisterHandleType(buffer.get(), PrimType(dtype));
