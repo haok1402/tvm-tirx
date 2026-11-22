@@ -137,9 +137,15 @@ def _warp_kernel(kind):
                 # A lane that runs __activemask is in its own mask.
                 lane_bit = T.shift_left(T.uint32(1), T.Cast("uint32", tid))
                 ok = T.And(tid % 2 == 0, T.bitwise_and(T.cuda.__activemask(), lane_bit) != 0)
+                out[tid] = T.Select(ok, T.int32(1), T.int32(0))
             else:
-                ok = T.Or(tid % 2 == 1, T.cuda.any_sync(T.uint32(0x5555), tid % 2 == 0) != 0)
-            out[tid] = T.Select(ok, T.int32(1), T.int32(0))
+                # On this stack T.cuda.any_sync is bound where it is called (run it conditionally by
+                # calling it inside an ``if``), so the guard is an ``if``, not the left operand of ``||``.
+                out[tid] = T.int32(1)
+                if tid % 2 == 0:
+                    out[tid] = T.Select(
+                        T.cuda.any_sync(T.uint32(0x5555), tid % 2 == 0) != 0, T.int32(1), T.int32(0)
+                    )
 
     return main
 
@@ -147,7 +153,13 @@ def _warp_kernel(kind):
 @pytest.mark.parametrize("kind", ["activemask", "any_sync"])
 def test_warp_collectives_keep_short_circuit(kind):
     _, src = _compile(_warp_kernel(kind))
-    assert ("&&" if kind == "activemask" else "||") in src, src
+    if kind == "activemask":
+        assert "&&" in src, src
+    else:
+        # Opaque (ISSUE-021): called once, inside the even-lane branch, never hoisted out of it.
+        body = src[src.index("__global__") :]
+        assert body.count("any_sync(") == 1, src
+        assert body.index("% 2) == 0)") < body.index("any_sync("), src
 
 
 @pytest.mark.gpu
