@@ -47,9 +47,8 @@ class BackendConfigBinder : public StmtExprMutator {
     TVM_FFI_CHECK(!func->GetAttr<ffi::String>("tirx.cuda_arch").has_value(), ValueError)
         << "tirx.cuda_arch was removed; set backend_config['cuda']['arch'] on device_entry or "
            "tvm_tirx.compile";
-    auto resolved =
-        resolve_(func->GetAttr<ffi::String>("backend_config").value_or(""), defaults_, target_)
-            .cast<ffi::Array<ffi::Any>>();
+    function_config_ = func->GetAttr<ffi::String>("backend_config").value_or("");
+    auto resolved = resolve_(function_config_, defaults_, target_).cast<ffi::Array<ffi::Any>>();
     target_ = resolved[0].cast<Target>();
     defaults_ = resolved[1].cast<ffi::String>();
     if (func->GetAttr(tvm::attr::kDeclaration).value_or(false)) return func;
@@ -64,8 +63,12 @@ class BackendConfigBinder : public StmtExprMutator {
       return StmtExprMutator::Mutate_(op, inplace_mode);
     }
     auto local = op->attrs->dict.Get("backend_config");
+    // The source names and the function's own attribute let an fp_mode conflict error name
+    // both configurations.
+    ffi::String source = op->op->name == "tirx.device_entry" ? "the device_entry backend_config"
+                                                             : "the device_scope backend_config";
     auto resolved = resolve_(local.has_value() ? local.value().cast<ffi::String>() : ffi::String(),
-                             defaults_, target_)
+                             defaults_, target_, source, function_config_)
                         .cast<ffi::Array<ffi::Any>>();
     auto attrs = op->attrs->dict;
     attrs.Set(tvm::attr::kTarget.name, resolved[0]);
@@ -76,6 +79,7 @@ class BackendConfigBinder : public StmtExprMutator {
   }
   Target target_;
   ffi::String defaults_;
+  ffi::String function_config_;
   ffi::Function resolve_;
 };
 

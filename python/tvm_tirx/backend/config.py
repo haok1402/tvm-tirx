@@ -38,11 +38,18 @@ def copy_backend_config(config=None):
 
 
 def merge_backend_configs(*configs):
-    """Overlay explicitly supplied keys; argument lists replace inherited lists."""
+    """Overlay explicitly supplied keys; argument lists replace inherited lists.
+
+    Later configurations are more specific. A CUDA ``fp_mode`` composes with inherited
+    argument lists instead of replacing them; see
+    :func:`tvm_tirx.backend.cuda.backend_config.merge_backend_config`.
+    """
+    from .cuda.backend_config import merge_backend_config
+
     result = {}
     for config in configs:
         for name, value in copy_backend_config(config).items():
-            result.setdefault(name, {}).update(value)
+            result[name] = merge_backend_config(result.get(name, {}), value)
     return result
 
 
