@@ -20,6 +20,7 @@
 import glob
 import os
 import platform
+import re
 import subprocess
 import warnings
 
@@ -44,6 +45,23 @@ def compile_cuda(code, *, backend_config=None, target=None, path_target=None):
         with open(path_target, "wb") as output:
             output.write(result.binary)
     return bytearray(result.binary)
+
+
+def _nvcc_arch_args(arch, target_format):
+    """nvcc arguments selecting ``arch`` for ``target_format``.
+
+    For a fatbin, nvcc expands ``-arch sm_90a`` to the ``sm_90a`` code plus a portable
+    ``compute_90`` PTX. That extra pass rejects architecture-specific instructions
+    (``wgmma.fence ... not supported on .target 'sm_90'``), and code that guards them with
+    ``__CUDA_ARCH_FEAT_SM90_ALL`` / ``__CUDA_ARCH_SPECIFIC__`` would be compiled without them
+    into PTX the driver may JIT instead. For an architecture- or family-specific target
+    (``sm_90a``, ``sm_100a``, ``sm_100f``, ...), embed that target's SASS and PTX only. A
+    cubin or PTX output is compiled for the given target alone, so ``-arch`` is kept there.
+    """
+    if target_format == "fatbin" and re.fullmatch(r"sm_\d+[af]", arch):
+        virtual = "compute_" + arch[len("sm_") :]
+        return ["-gencode", f"arch={virtual},code=[{arch},{virtual}]"]
+    return ["-arch", arch]
 
 
 def _compile_cuda_nvcc(
@@ -105,7 +123,7 @@ def _compile_cuda_nvcc(
     if isinstance(arch, list):
         cmd += arch
     elif isinstance(arch, str):
-        cmd += ["-arch", arch]
+        cmd += _nvcc_arch_args(arch, target_format)
 
     cmd += [
         "-U__CUDA_NO_HALF_OPERATORS__",
