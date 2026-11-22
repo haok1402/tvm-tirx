@@ -734,6 +734,21 @@ def variants(entry: InstructionEntry) -> tuple:
     )
 
 
+# The `.ss` of ld (PTX ISA 9.7.10.8): `.const`, `.global`, `.local`, `.param{::entry, ::func}` and
+# `.shared{::cta, ::cluster}`. `.param` / `.const` read a kernel parameter or `__constant__` data
+# through the constant bank (SASS LDC), which a generic ld cannot; the address is a state-space
+# address, e.g. from `cvta.to.param.u64`.
+# NOT REGISTERED: `.param::func`. A register address is a kernel-parameter (`.param::entry`)
+# address: MEASURED on CUDA 13.2 ptxas, `ld.param::func` with one is "Illegal state space for
+# address operand '::func' with instruction 'ld'".
+_LD_SPACES = (
+    "global", "shared", "shared::cta", "shared::cluster", "local", "const", "param", "param::entry",
+)  # fmt: skip
+# The spaces whose loads go through the constant bank. Their address operand is a state-space
+# address (a uint64), never a generic pointer: see engine._coerce_address.
+LD_CONSTANT_BANK_SPACES = ("const", "param", "param::entry")
+
+
 def _check_cache_hint(m):
     """`{.level::cache_hint}` and its `{, cache_policy}` operand, per ISA
     9.7.10.8/9.7.10.9/9.7.10.11/9.7.15.5/9.7.15.6 and MEASURED on ptxas 13.4
@@ -753,7 +768,13 @@ def _check_cache_hint(m):
     """
     if not m.get("cache"):
         return None
-    if m["space"] in ("local", "shared", "shared::cta", "shared::cluster"):
+    if m["space"] in (
+        "local",
+        "shared",
+        "shared::cta",
+        "shared::cluster",
+        *LD_CONSTANT_BANK_SPACES,
+    ):
         return f".level::cache_hint is an L2 policy and is not valid on .{m['space']}"
     if m.get("sem") == "volatile":
         return "the .volatile syntax line carries no .level::cache_hint"
@@ -792,6 +813,11 @@ def _check_ld(m):
             return "ld.mmio may only be used with .global or generic addressing"
         if cop or nc or l1ev or prefetch or m.get("cache"):
             return "ld.mmio takes no cache qualifiers"
+    if sem in ("relaxed", "acquire", "volatile") and ss in LD_CONSTANT_BANK_SPACES:
+        # "May be used with .global, .shared spaces, or generic addressing" (.relaxed /
+        # .acquire). MEASURED on CUDA 13.2 ptxas: "Modifier '.volatile' cannot be applied to
+        # '.param' space", and the same for .relaxed and for '.const'.
+        return f"ld.{sem} is not valid on .{ss}"
     if sem in ("relaxed", "acquire") and not mmio:
         # "May be used with .global, .shared spaces, or generic addressing.
         # Cache operations are not allowed."
@@ -7464,7 +7490,7 @@ _ENTRIES = [
             # truncates) but which addresses the wrong thing.
             ModifierSlot(
                 "space",
-                ("global", "shared", "shared::cta", "shared::cluster", "local"),
+                _LD_SPACES,
                 optional=True,  # omitted = generic addressing
             ),
             ModifierSlot("cop", ("ca", "cg", "cs", "lu", "cv"), optional=True),
@@ -7512,7 +7538,7 @@ _ENTRIES = [
             ModifierSlot("scope", _ATOM_SCOPES, optional=True),
             ModifierSlot(
                 "space",
-                ("global", "shared", "shared::cta", "shared::cluster", "local"),
+                _LD_SPACES,
                 optional=True,
             ),
             ModifierSlot("cop", ("ca", "cg", "cs", "lu", "cv"), optional=True),
