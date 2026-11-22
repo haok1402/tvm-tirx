@@ -36,6 +36,43 @@ namespace tvm {
 namespace sym {
 namespace detail {
 
+/*!
+ * \brief Whether an integer cast may change the value of a source in [min_value, max_value].
+ *
+ * A cast from or to an unsigned type wraps modulo 2^bits (int32(uint32(0xFFFFFFFF)) == -1,
+ * uint32(int32(-1)) == 0xFFFFFFFF), and a cast to bool is `!= 0`. Kernels use these casts to
+ * reinterpret bits, so a source range that does not fit in the target does not carry over.
+ * Signed-to-signed casts return false: index arithmetic is assumed not to overflow, so a
+ * narrowing cast such as an int64 index to int32 is assumed to keep the value. So do casts
+ * from or to non-integer types: an out-of-range float-to-int cast is undefined in C.
+ *
+ * \param min_value, max_value The source's constant bound; ConstIntBound::kPosInf and kNegInf
+ *        mean unbounded.
+ */
+inline bool IntegerCastMayWrap(PrimType source, PrimType target, int64_t min_value,
+                               int64_t max_value) {
+  constexpr int64_t kPosInf = ConstIntBound::kPosInf;
+  constexpr int64_t kNegInf = ConstIntBound::kNegInf;
+  bool integer_source =
+      source.MatchesCode(DLDataTypeCode::kDLInt, DLDataTypeCode::kDLUInt, DLDataTypeCode::kDLBool);
+  bool unsigned_target = target.MatchesCode(DLDataTypeCode::kDLUInt, DLDataTypeCode::kDLBool);
+  bool reinterprets =
+      (integer_source && unsigned_target) ||
+      (source.MatchesCode(DLDataTypeCode::kDLUInt) && target.MatchesCode(DLDataTypeCode::kDLInt));
+  if (!reinterprets) return false;
+  int64_t lo = 0;
+  int64_t hi = 1;
+  if (!target.MatchesCode(DLDataTypeCode::kDLBool)) {
+    int value_bits = target.bits() - (unsigned_target ? 0 : 1);
+    hi = value_bits >= 63 ? kPosInf : (static_cast<int64_t>(1) << value_bits) - 1;
+    if (!unsigned_target) lo = value_bits >= 63 ? kNegInf : -(static_cast<int64_t>(1) << value_bits);
+  }
+  if (min_value < lo || max_value > hi) return true;
+  // kPosInf on a uint64 source stands for "up to 2^64 - 1", beyond any signed target.
+  return max_value == kPosInf && source.MatchesCode(DLDataTypeCode::kDLUInt) &&
+         !unsigned_target;
+}
+
 enum class CompareKind { kEQ, kLT, kLE, kGT, kGE };
 
 inline void AppendFloorDivConstraints(const prim::FloorDivObj* div, const IntImm& k,

@@ -24,7 +24,11 @@ import tvm_tirx.testing
 def test_cast():
     analyzer = tvm_tirx.sym.Analyzer()
     x = tvm_tirx.tirx.Var("x", "int8")
+    # x * 3 can be negative, and uint32(-3) == 2**32 - 3 is not a multiple of 3: the cast wraps
+    # modulo 2**32, so only the residue modulo gcd(3, 2**32) == 1 survives.
     m = analyzer.modular_set((x * 3).astype("uint32"))
+    assert m.coeff == 1
+    m = analyzer.modular_set((x * 3).astype("int32"))
     assert m.coeff == 3
     assert m.base == 0
     m = analyzer.modular_set((x * 3 + 1).astype("float32").astype("int32"))

@@ -29,6 +29,7 @@
 #include <tvm/ir/prim/pattern_match.h>
 #include <tvm/sym/analyzer.h>
 
+#include <algorithm>
 #include <limits>
 #include <numeric>
 #include <optional>
@@ -191,7 +192,21 @@ class ModularSetAnalyzer::Impl final
     return Dispatch(op->body);
   }
 
-  Entry Dispatch_(const prim::CastObj* op) final { return Dispatch(op->value); }
+  Entry Dispatch_(const prim::CastObj* op) final {
+    Entry a = Dispatch(op->value);
+    PrimType target = op->ty.as_or_throw<PrimType>();
+    if (!target.MatchesCode(DLDataTypeCode::kDLInt, DLDataTypeCode::kDLUInt)) return a;
+    ConstIntBound bound = parent_->const_int_bound(op->value);
+    if (!detail::IntegerCastMayWrap(op->value.ty(), target, bound->min_value, bound->max_value)) {
+      return a;
+    }
+    // Wrapping subtracts a multiple of 2^bits, so only the residue modulo the largest power of
+    // two dividing both the coefficient and 2^bits survives.
+    int shift = std::min(target.bits(), 62);
+    int64_t modulus = static_cast<int64_t>(1) << shift;
+    if (a.coeff != 0) modulus = std::min(modulus, a.coeff & -a.coeff);
+    return Entry(modulus, a.base);
+  }
 
   Entry Dispatch_(const IntImmObj* op) final {
     if (auto value = op->value.as<int64_t>(); value.has_value()) return Entry(0, *value);

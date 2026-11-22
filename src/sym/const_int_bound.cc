@@ -227,7 +227,11 @@ class ConstIntBoundAnalyzer::Impl final
       a = Dispatch(op->value);
     }
 
-    Entry b = Everything(op->ty.as_or_throw<PrimType>());
+    PrimType target = op->ty.as_or_throw<PrimType>();
+    Entry b = Everything(target);
+    // A cast that reinterprets bits (uint32 -> int32, int -> uint) wraps: the source range
+    // carries over only if it fits. Otherwise the range is clipped to the target's.
+    if (detail::IntegerCastMayWrap(op->value.ty(), target, a.min_value, a.max_value)) return b;
     return Intersect(a, b);
   }
 

@@ -126,7 +126,9 @@ class TestCastBound(BaseCompare):
 
     @pytest.fixture(
         params=[
-            TestCase(tmod(x, 3).astype("uint32"), (0, 2)),
+            # truncmod(x, 3) is in [-2, 2], and uint32(-1) == 0xFFFFFFFF.
+            TestCase(tmod(x, 3).astype("uint32"), (0, 2**32 - 1)),
+            TestCase((tmod(x, 3) + 2).astype("uint32"), (0, 4)),
             TestCase(tmod(x, 3).astype("float32").astype("int32"), (-2, 2)),
         ],
         scope="session",
