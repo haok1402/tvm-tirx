@@ -87,17 +87,18 @@ def header_generator(tags):
   using cuda::std::int32_t;
   using cuda::std::int64_t;
 
-  #include <cuda/std/type_traits>
+  // The helpers below need only std::is_same_v. libcu++'s <cuda/std/type_traits> (and
+  // <cuda/std/limits>) would add hundreds of constexpr statics to every module as device globals
+  // and constant-bank data (sm90-probe ISSUE-024), so TIRx defines is_same itself. The NVRTC
+  // driver includes <cuda/std/type_traits> instead, and defines TVM_TIRX_LIBCUXX_TYPE_TRAITS,
+  // when the source uses another std:: trait or NVSHMEM.
+  #ifndef TVM_TIRX_LIBCUXX_TYPE_TRAITS
   namespace std {
-    using cuda::std::is_same;
-    using cuda::std::is_same_v;
-    using cuda::std::is_integral;
-    using cuda::std::is_signed;
-    using cuda::std::is_unsigned;
-    using cuda::std::is_floating_point;
-    using cuda::std::enable_if;
-    using cuda::std::conditional;
+    template <class A, class B> struct is_same { static constexpr bool value = false; };
+    template <class A> struct is_same<A, A> { static constexpr bool value = true; };
+    template <class A, class B> inline constexpr bool is_same_v = is_same<A, B>::value;
   }
+  #endif
 
   // NVRTC uses asm/volatile instead of __asm__/__volatile__ (gcc extension).
   #ifndef __asm__
