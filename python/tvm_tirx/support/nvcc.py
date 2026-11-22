@@ -223,9 +223,12 @@ def _find_cuda_target_include(cuda_path):
     return None
 
 
-# std:: type traits beyond is_same (which the generated header defines itself).
-_NEEDS_LIBCUXX_TRAITS = re.compile(
-    r"\bstd::(is_integral|is_signed|is_unsigned|is_floating_point|enable_if|conditional)"
+# Source that needs libcu++: a std:: type trait beyond is_same (which the generated header
+# defines itself), or any cuda::std:: facility other than the <cuda/std/cstdint> typedefs that the
+# preamble and header name themselves (e.g. cuda::std::is_same_v, cuda::std::numeric_limits).
+_NEEDS_LIBCUXX = re.compile(
+    r"\bstd::(is_integral|is_signed|is_unsigned|is_floating_point|enable_if|conditional)\b"
+    r"|\bcuda::std::(?!u?int(?:8|16|32|64)_t\b)\w"
 )
 
 
@@ -368,11 +371,13 @@ using cuda::std::int64_t;
 """
     code_filtered = nvrtc_preamble + code_filtered
 
-    # libcu++'s type traits, mapped into std::, only when something needs more than the
-    # std::is_same the generated header defines: NVSHMEM's headers, or source that names another
-    # trait. Including them otherwise costs every module the libcu++ statics (ISSUE-024).
-    if use_nvshmem or _NEEDS_LIBCUXX_TRAITS.search(code_filtered):
+    # libcu++'s type traits (mapped into std::) and limits, only when something needs more than
+    # the std::is_same the generated header defines: NVSHMEM's headers, or source that names
+    # another std:: trait or a cuda::std:: facility. Including them otherwise costs every module
+    # the libcu++ statics (ISSUE-024).
+    if use_nvshmem or _NEEDS_LIBCUXX.search(code_filtered):
         nvshmem_preamble = """#include <cuda/std/type_traits>
+#include <cuda/std/limits>
 #define TVM_TIRX_LIBCUXX_TYPE_TRAITS 1
 
 // Map cuda::std type traits to std namespace (NVSHMEM headers, generated code)

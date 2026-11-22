@@ -103,6 +103,36 @@ def test_module_has_no_payload(extra):
     assert sum(sizes.values()) == 0, sizes
 
 
+CUDA_STD_SRC = {
+    "is_same_v": (
+        "__device__ __forceinline__ int tirx_test_cuda_std(int x) "
+        "{ return cuda::std::is_same_v<int, int> ? x : -x; }\n"
+    ),
+    "numeric_limits": (
+        "__device__ __forceinline__ int tirx_test_cuda_std(int x) "
+        "{ return x < cuda::std::numeric_limits<int>::max() ? x : 0; }\n"
+    ),
+}
+
+
+@pytest.mark.skipif(not env.has_cuda(), reason="needs the CUDA toolkit")
+@pytest.mark.parametrize("facility", list(CUDA_STD_SRC))
+def test_cuda_std_names_still_compile(facility):
+    # Source naming a cuda::std:: facility gets libcu++'s traits and limits back.
+    @T.function
+    def main(out: T.Tensor((32,), "int32")):
+        T.device_entry(launch=T.cuda.LaunchConfig(grid=1, block=32))
+        tid = T.cuda.thread_idx("x")
+        out[tid] = T.cuda.func_call("tirx_test_cuda_std", tid, CUDA_STD_SRC[facility], ty="int32")
+
+    mod = _compile(main)
+    _cubin(mod)
+    if env.has_cuda_compute(9):
+        out = tvm_tirx.runtime.tensor(np.zeros(32, "int32"), device=tvm_tirx.cuda(0))
+        _compile(main, env.cuda_arch())(out)
+        np.testing.assert_array_equal(out.numpy(), np.arange(32))
+
+
 @pytest.mark.skipif(not env.has_cuda(), reason="needs the CUDA toolkit")
 def test_other_std_traits_still_compile():
     # Source naming another std:: trait gets libcu++'s traits (and their payload) back.
