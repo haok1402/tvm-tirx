@@ -308,6 +308,44 @@ device_intrinsic(
 )
 
 
+def _mbarrier_wait_parity_parts(barrier, phase, ticks, sem, scope):
+    raw, _, addr = _mbarrier_wait_parts(barrier)
+    sem, scope = parse_str(sem), parse_str(scope)
+    qualifiers = f".{sem}.{scope}" if sem else ""
+    suffix = f"_{sem}_{scope}" if sem else ""
+    signature = (
+        "(unsigned int barrier, int phase, unsigned int ticks)"
+        if raw
+        else "(void* barrier, int phase, unsigned int ticks)"
+    )
+    return f"tvm_builtin_cuda_mbarrier_wait_parity{raw}{suffix}", signature, addr, qualifiers
+
+
+# A blocking mbarrier parity wait spelled as one asm retry loop: the text of cutlass's
+# ClusterBarrier::wait. Unlike a C loop around the single-shot try_wait, it leaves the
+# enclosing loop body free of inner loops, so nvcc/NVRTC can still unroll it. The "memory"
+# clobber orders plain C accesses to the barrier-protected data after the wait.
+device_intrinsic(
+    "cuda.mbarrier_wait_parity",
+    n_attrs=2,
+    helper_name=lambda *a: _mbarrier_wait_parity_parts(*a)[0],
+    c_signature=lambda *a: _mbarrier_wait_parity_parts(*a)[1],
+    body=lambda *a: (
+        _mbarrier_wait_parity_parts(*a)[2] + "    asm volatile(\n"
+        '        "{\\n\\t"\n'
+        '        ".reg .pred       P1; \\n\\t"\n'
+        '        "LAB_WAIT: \\n\\t"\n'
+        f'        "mbarrier.try_wait.parity{_mbarrier_wait_parity_parts(*a)[3]}'
+        '.shared::cta.b64 P1, [%0], %1, %2; \\n\\t"\n'
+        '        "@P1 bra DONE; \\n\\t"\n'
+        '        "bra     LAB_WAIT; \\n\\t"\n'
+        '        "DONE: \\n\\t"\n'
+        '        "}"\n'
+        '        :: "r"(barrier_addr_int), "r"(phase), "r"(ticks) : "memory");'
+    ),
+)
+
+
 # mbarrier.try_wait.parity.acquire.cluster — cluster-scope acquire wait used for
 # cross-CTA barrier handshakes (e.g. the tmem-finished handoff).
 device_intrinsic(

@@ -243,3 +243,42 @@ class PTXNamespace(_PTXNamespace):
 
 
 _init_exposed_op_api("tirx.cuda", __name__, wrapper=_auto_emit_void_call)
+
+_mbarrier_wait_parity_op = globals()["mbarrier_wait_parity"]
+
+
+def mbarrier_wait_parity(bar, phase, ticks=0x989680, *, sem="", scope=""):
+    """Block until the mbarrier phase with parity ``phase`` completes.
+
+    One asm retry loop around ``mbarrier.try_wait.parity``, with the text of cutlass's
+    ``ClusterBarrier::wait``::
+
+        { .reg .pred P1; LAB_WAIT:
+          mbarrier.try_wait.parity{.sem.scope}.shared::cta.b64 P1, [bar], phase, ticks;
+          @P1 bra DONE; bra LAB_WAIT; DONE: }
+
+    Use it instead of a TIRx ``while`` loop around the single-shot ``try_wait``: that loop is
+    a C loop, and nvcc/NVRTC do not unroll an enclosing ``#pragma unroll`` loop whose body
+    contains another loop. The wait also adds a ``"memory"`` clobber, so plain accesses to
+    the data the barrier protects are not moved above it.
+
+    Parameters
+    ----------
+    bar : Expr
+        The mbarrier: a shared-memory pointer, or a ``uint32`` shared-window address.
+    phase : Expr
+        The phase parity to wait for.
+    ticks : Expr
+        The ``suspendTimeHint`` of each try, in nanoseconds; cutlass uses ``0x989680``.
+    sem, scope : str
+        The optional ``.sem.scope`` qualifiers, e.g. ``sem="acquire", scope="cluster"``. Both
+        empty (the default) is cutlass's plain form, whose semantics are ``.acquire.cta``.
+    """
+    if (sem == "") != (scope == ""):
+        raise ValueError("mbarrier_wait_parity takes both sem and scope, or neither")
+    if sem not in ("", "acquire", "relaxed") or scope not in ("", "cta", "cluster"):
+        raise ValueError(
+            f"mbarrier_wait_parity: sem must be 'acquire' or 'relaxed' and scope 'cta' or "
+            f"'cluster', got sem={sem!r}, scope={scope!r}"
+        )
+    return _mbarrier_wait_parity_op(bar, phase, ticks, sem, scope)

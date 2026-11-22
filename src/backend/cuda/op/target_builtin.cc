@@ -331,6 +331,13 @@ void RegisterDeviceIntrinsics() {
                           sig::arg("bar"), sig::arg<IntExpr>("phase"))
       .set_attr(tvm::op_attr::kFixedReturnType, PrimType::Void())
       .expose();
+  // Blocking parity wait as one asm retry loop (cutlass ClusterBarrier::wait); the Python
+  // wrapper T.cuda.mbarrier_wait_parity supplies the defaults for ticks, sem and scope.
+  RegisterDeviceIntrinsic(OpDef("tirx.cuda.mbarrier_wait_parity"), CallEffectKind::kOpaque,
+                          sig::arg("bar"), sig::arg<IntExpr>("phase"), sig::arg<IntExpr>("ticks"),
+                          sig::arg<StringImm>("sem"), sig::arg<StringImm>("scope"))
+      .set_attr(tvm::op_attr::kFixedReturnType, PrimType::Void())
+      .expose();
   RegisterDeviceIntrinsic(OpDef("tirx.cuda.mbarrier_wait_acquire_cluster"), CallEffectKind::kOpaque,
                           sig::arg("bar"), sig::arg<IntExpr>("phase"))
       .set_attr(tvm::op_attr::kFixedReturnType, PrimType::Void())

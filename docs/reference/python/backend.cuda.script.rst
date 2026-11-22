@@ -101,6 +101,7 @@ Functions
    make_float2
    mbarrier_wait
    mbarrier_wait_acquire_cluster
+   mbarrier_wait_parity
    nano_sleep
    printf
    reduce_add_sync_u32

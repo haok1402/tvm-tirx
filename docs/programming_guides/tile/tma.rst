@@ -98,6 +98,13 @@ expected arrivals and transaction bytes have been satisfied. The
 <https://mlc.ai/modern-gpu-programming-for-mlsys/chapter_async_barriers/index.html>`_
 explains phases and reuse across pipeline stages.
 
+Write a blocking wait as one call: ``T.cuda.mbarrier_wait`` or
+``T.cuda.mbarrier_wait_parity``, which keep the retry loop inside one asm
+block (the latter with the text of cutlass's ``ClusterBarrier::wait``). A
+TIRx ``while`` loop around the single-shot ``mbarrier.try_wait`` is a C loop
+instead, and NVRTC and nvcc then do not unroll an enclosing
+``#pragma unroll`` loop with a runtime trip count.
+
 Store Completion
 ----------------
 
