@@ -23,7 +23,9 @@
  */
 
 #include <tvm/ffi/cast.h>
+#include <tvm/ffi/extra/structural_hash.h>
 #include <tvm/ffi/extra/structural_mutate.h>
+#include <tvm/ffi/extra/structural_visit.h>
 #include <tvm/ffi/function.h>
 #include <tvm/ffi/reflection/registry.h>
 #include <tvm/ir/prim/expr.h>
@@ -34,6 +36,10 @@
 #include <tvm/tirx/op/memory.h>
 #include <tvm/tirx/stmt_functor_with_constraint_context.h>
 #include <tvm/tirx/transform.h>
+
+#include <unordered_map>
+#include <unordered_set>
+#include <vector>
 
 namespace tvm {
 namespace tirx {
@@ -76,10 +82,82 @@ class StmtSimplifier : public StmtExprMutatorWithConstraintContext {
   // Pure Bind values kept for substitution into assert conditions.
   // Grows monotonically under SSA — no scope-based cleanup required.
   ffi::Map<Var, PrimExpr> non_inlined_bindings_;
+  /* \brief Fold copies of bound values back into their variables.
+   *
+   * The analyzer substitutes every pure binding into its uses, which gives the rewrite rules the
+   * structure they need but also undoes a value the program bound once: `x = e; ... x ... x`
+   * prints as a dead `x` and `e` at every use (sm90-probe ISSUE-023). After simplification,
+   * replace each verbatim copy of an in-scope binding's (substituted) value with the variable.
+   * Only bindings whose value is non-trivial (not a constant or a variable, as CanInlineLet) and
+   * whose variable the input uses at least twice take part, so single-use bindings print as
+   * before.
+   */
+  PrimExpr FoldBoundValues(const PrimExpr& expr, const PrimExpr& original);
+
+  struct ExprHash {
+    size_t operator()(const PrimExpr& e) const { return ffi::StructuralHash::Hash(e); }
+  };
+  // Set while a TensorStore's indices are simplified: indices are left unfolded (see
+  // Mutate_(TensorStoreObj)).
+  bool fold_disabled_{false};
+  // Variables bound to a pure, non-trivial value that the function uses at least twice.
+  std::unordered_set<const VarObj*> foldable_vars_;
+  // Each foldable binding's value as the analyzer substitutes it, keyed by the variable.
+  std::unordered_map<const VarObj*, PrimExpr> substituted_values_;
 };
+
+// A binding that is left to the compiler: a constant, a variable (or a cast of one), or a value
+// computed only from constants and special registers (threadIdx.x & 31, lane_id(), blockIdx.y * 4,
+// ...). The last kind is cheap to rematerialize from S2R; holding it in a variable for the
+// whole scope instead changes register allocation (e.g. +13 % SASS in one sm_100 registry
+// kernel) without removing duplicated work.
+bool IsTrivialBinding(const PrimExpr& value) {
+  if (prim::IsConstNumber(value) || value.as<PrimVar>()) return true;
+  if (const auto* cast = value.as<prim::CastObj>(); cast && cast->value.as<PrimVar>()) return true;
+  bool has_var = false;
+  ffi::StructuralVisit(
+      value,
+      [&](const VarObj*,
+          ffi::StructuralVisitorObj*) -> ffi::Expected<ffi::Optional<ffi::VisitInterrupt>> {
+        has_var = true;
+        return ffi::VisitInterrupt();
+      },
+      [](const TypeObj*, ffi::StructuralVisitorObj*)
+          -> ffi::Expected<ffi::Optional<ffi::VisitInterrupt>> { return std::nullopt; });
+  return !has_var;
+}
 
 Function StmtSimplifier::Run(Function func) {
   AddParamConstraints(func);
+  {
+    // Count the uses (not the definitions) of every variable.
+    std::unordered_map<const VarObj*, int> uses;
+    ffi::StructuralVisit(
+        func->body,
+        [&](const VarObj* var, ffi::StructuralVisitorObj* visitor)
+            -> ffi::Expected<ffi::Optional<ffi::VisitInterrupt>> {
+          if (visitor->def_region_kind() == kTVMFFIDefRegionKindNone) ++uses[var];
+          return std::nullopt;
+        },
+        [](const TypeObj*, ffi::StructuralVisitorObj*)
+            -> ffi::Expected<ffi::Optional<ffi::VisitInterrupt>> { return std::nullopt; });
+    ffi::StructuralVisit(
+        func->body,
+        [&](const BindObj* bind, ffi::StructuralVisitorObj* visitor)
+            -> ffi::Expected<ffi::Optional<ffi::VisitInterrupt>> {
+          if (auto value = bind->value.as<PrimExpr>()) {
+            const PrimExpr& v = value.value();
+            bool trivial = IsTrivialBinding(v);
+            if (!trivial && v.ty().IsScalar() && uses[bind->var.get()] >= 2 &&
+                SideEffect(v) <= CallEffectKind::kPure) {
+              foldable_vars_.insert(bind->var.get());
+            }
+          }
+          return visitor->DefaultVisitExpected(bind);
+        },
+        [](const TypeObj*, ffi::StructuralVisitorObj*)
+            -> ffi::Expected<ffi::Optional<ffi::VisitInterrupt>> { return std::nullopt; });
+  }
   auto* n = func.CopyOnWrite();
   // Shared string literals no longer enter the primitive analyzer.  Inline their
   // SSA bindings so existing literal arguments remain constants during lowering.
@@ -120,7 +198,10 @@ UnchangedOr<ffi::Any> StmtSimplifier::Mutate(ffi::AnyView input, InplaceMode inp
   }
   if (auto expr = input.as<PrimExpr>()) {
     PrimExpr simplified = GetSyncedAnalyzer()->Simplify(*expr);
-    if (simplified.same_as(*expr)) return ffi::Unchanged();
+    if (!foldable_vars_.empty() && !fold_disabled_) simplified = FoldBoundValues(simplified, *expr);
+    if (simplified.same_as(*expr) || prim::ExprDeepEqual()(simplified, *expr)) {
+      return ffi::Unchanged();
+    }
     return simplified;
   }
   return Parent::Mutate(input, inplace_mode);
@@ -197,9 +278,24 @@ UnchangedOr<Stmt> StmtSimplifier::Mutate_(const IfObj* op, InplaceMode inplace_m
 }
 
 UnchangedOr<Stmt> StmtSimplifier::Mutate_(const TensorStoreObj* op, InplaceMode inplace_mode) {
+  // Indices keep the substituted form: later passes and the CUDA codegen prove alignment and
+  // vector access patterns on them (e.g. `i * 4` in a Ramp base) without the bindings in scope.
+  // Only the stored value is folded.
+  // The store may be mutated in place, so keep the value as written for FoldBoundValues.
+  PrimExpr original_value = op->value;
+  fold_disabled_ = true;
   TensorStore store = Parent::Mutate_(op, inplace_mode)
                           .ValueOrUnchanged(ffi::GetRef<Stmt>(op))
                           .as_or_throw<TensorStore>();
+  fold_disabled_ = false;
+  if (!foldable_vars_.empty()) {
+    PrimExpr folded = FoldBoundValues(store->value, original_value);
+    if (!folded.same_as(store->value)) {
+      auto n = ffi::make_object<TensorStoreObj>(*store.get());
+      n->value = std::move(folded);
+      store = Stmt(std::move(n)).as_or_throw<TensorStore>();
+    }
+  }
   if (const TensorLoadObj* load = store->value.as<TensorLoadObj>()) {
     TensorVar tensor = load->source.as_or_throw<tvm::tirx::TensorVar>();
     if (tensor.same_as(store->dest.as_or_throw<TensorVar>()) &&
@@ -221,6 +317,94 @@ bool StmtSimplifier::ArrayDeepEqual(const ffi::Array<PrimExpr>& lhs,
     }
   }
   return true;
+}
+
+PrimExpr StmtSimplifier::FoldBoundValues(const PrimExpr& expr, const PrimExpr& original) {
+  if (expr.as<IntImmObj>() || expr.as<FloatImmObj>() || expr.as<VarObj>()) return expr;
+  // Undo only the analyzer's substitution: fold the bindings that `original` referenced,
+  // directly or through another binding's value. An expression the program wrote out itself
+  // stays as written, even if it equals some binding's value.
+  std::unordered_map<const VarObj*, PrimExpr> in_scope;
+  constraints->ForEach([&](const sym::Constraint& constraint) {
+    if (const auto* binding = constraint.as<sym::BindingConstraintObj>()) {
+      if (foldable_vars_.count(binding->var.get()))
+        in_scope.insert_or_assign(binding->var.get(), binding->value);
+    }
+  });
+  if (in_scope.empty()) return expr;
+  std::unordered_set<const VarObj*> referenced;
+  std::vector<PrimExpr> worklist{original};
+  while (!worklist.empty()) {
+    PrimExpr e = worklist.back();
+    worklist.pop_back();
+    ffi::StructuralVisit(
+        e,
+        [&](const VarObj* var,
+            ffi::StructuralVisitorObj*) -> ffi::Expected<ffi::Optional<ffi::VisitInterrupt>> {
+          auto it = in_scope.find(var);
+          if (it != in_scope.end() && referenced.insert(var).second) worklist.push_back(it->second);
+          return std::nullopt;
+        },
+        [](const TypeObj*, ffi::StructuralVisitorObj*)
+            -> ffi::Expected<ffi::Optional<ffi::VisitInterrupt>> { return std::nullopt; });
+  }
+  if (referenced.empty()) return expr;
+  // The in-scope foldable bindings, value -> variable. The context is the live scope, so a
+  // variable bound in a branch that has ended cannot be folded into code after it.
+  std::unordered_map<PrimExpr, Var, ExprHash, prim::ExprDeepEqual> by_value;
+  constraints->ForEach([&](const sym::Constraint& constraint) {
+    const auto* binding = constraint.as<sym::BindingConstraintObj>();
+    if (!binding || !referenced.count(binding->var.get())) return;
+    auto it = substituted_values_.find(binding->var.get());
+    if (it == substituted_values_.end()) {
+      PrimExpr value = GetSyncedAnalyzer()->Simplify(binding->value);
+      it = substituted_values_.emplace(binding->var.get(), value).first;
+    }
+    if (prim::IsConstNumber(it->second) || it->second.as<VarObj>()) return;
+    by_value.emplace(it->second, binding->var);
+  });
+  if (by_value.empty()) return expr;
+  // Vector values, vector index structure (Ramp / Broadcast) and loads keep the substituted
+  // form: later passes and the codegen prove alignment and access patterns on them. Mask them
+  // with placeholder variables, fold the rest, then put them back. (A pre-order callback that
+  // returns a node as its own replacement does not stop the walk from descending into it.)
+  std::unordered_map<const VarObj*, PrimExpr> holes;
+  PrimExpr masked = ffi::StructuralMap<ffi::WalkOrder::kPreOrder>(
+                        expr,
+                        [&](const PrimExpr& e) -> ffi::Expected<ffi::UnchangedOr<ffi::Any>> {
+                          if (e.as<VarObj>() || e.as<IntImmObj>() || e.as<FloatImmObj>())
+                            return ffi::Unchanged();
+                          if (!e.ty().IsScalar() || e.as<prim::RampObj>() ||
+                              e.as<prim::BroadcastObj>() || e.as<TensorLoadObj>()) {
+                            PrimVar hole("fold_hole", e.ty());
+                            holes.emplace(hole.get(), e);
+                            return ffi::Any(hole);
+                          }
+                          return ffi::Unchanged();
+                        })
+                        .as_or_throw<PrimExpr>();
+  // Pre-order, so the largest matching subexpression is folded first.
+  PrimExpr folded = ffi::StructuralMap<ffi::WalkOrder::kPreOrder>(
+                        masked,
+                        [&](const PrimExpr& e) -> ffi::Expected<ffi::UnchangedOr<ffi::Any>> {
+                          if (e.as<VarObj>() || e.as<IntImmObj>() || e.as<FloatImmObj>()) {
+                            return ffi::Unchanged();
+                          }
+                          auto it = by_value.find(e);
+                          if (it != by_value.end()) return ffi::Any(it->second);
+                          return ffi::Unchanged();
+                        })
+                        .as_or_throw<PrimExpr>();
+  if (folded.same_as(masked)) return expr;
+  if (holes.empty()) return folded;
+  return ffi::StructuralMap<ffi::WalkOrder::kPreOrder>(
+             folded,
+             [&](const Var& var) -> ffi::Expected<ffi::UnchangedOr<ffi::Any>> {
+               auto it = holes.find(var.get());
+               if (it != holes.end()) return ffi::Any(it->second);
+               return ffi::Unchanged();
+             })
+      .as_or_throw<PrimExpr>();
 }
 
 ffi::Optional<bool> StmtSimplifier::ProveCondition(PrimExpr condition) {

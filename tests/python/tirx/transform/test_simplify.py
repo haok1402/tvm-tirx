@@ -409,8 +409,8 @@ def test_prove_condition_using_let():
     used to prove the value of a condition.
 
     With flat Bind, the analyzer binds the variable to its value for
-    constraint proving, which also substitutes the variable in later
-    expressions.
+    constraint proving. A variable used more than once is folded back into
+    the uses afterwards, so the store keeps `condition` (sm90-probe ISSUE-023).
     """
 
     @T.function(private=True)
@@ -424,7 +424,7 @@ def test_prove_condition_using_let():
     def expected(A: T.Tensor(4, "bool")):
         for i in T.serial(4):
             condition: T.let[T.bool] = i < 3
-            A[i] = i < 3
+            A[i] = condition
 
     after = _apply_simplify(before)
     tvm_tirx.ir.assert_structural_equal(after, expected)
@@ -459,9 +459,10 @@ def test_prove_let_condition():
 def test_prove_repeated_let_condition():
     """Simplify conditions using non-inlined let bindings
 
-    With analyzer Bind, the variable is substituted with its value,
-    so `if condition` becomes `if i < 3`, and within that context
-    the inner `if condition` simplifies to True and is eliminated.
+    With analyzer Bind, the variable is substituted with its value for the
+    proof, so within `if condition` the inner `if condition` simplifies to
+    True and is eliminated. The outer condition is folded back to the
+    variable, which is used more than once (sm90-probe ISSUE-023).
     """
 
     @T.function(private=True)
@@ -476,7 +477,7 @@ def test_prove_repeated_let_condition():
     def expected(A: T.Tensor(4, "bool")):
         for i in T.serial(4):
             condition: T.let[T.bool] = i < 3
-            if i < 3:
+            if condition:
                 A[i] = T.bool(True)
 
     after = _apply_simplify(before)
