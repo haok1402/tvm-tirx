@@ -202,7 +202,9 @@ void RegisterDeviceIntrinsics() {
         .set_attr(tvm::op_attr::kFixedReturnType, PrimType::Int(32))
         .expose();
   }
-  RegisterDeviceIntrinsic(OpDef("tirx.cuda.any_sync"), CallEffectKind::kPure,
+  // A warp vote: every lane in the mask must execute it, and the result depends on the other
+  // lanes, so it is opaque like ballot_sync, not pure.
+  RegisterDeviceIntrinsic(OpDef("tirx.cuda.any_sync"), CallEffectKind::kOpaque,
                           sig::arg<IntExpr>("mask"), sig::arg("pred"))
       .set_attr(tvm::op_attr::kFixedReturnType, PrimType::Int(32))
       .expose();
@@ -335,6 +337,9 @@ void RegisterDeviceIntrinsics() {
                           sig::arg("bar"), sig::arg<IntExpr>("phase"))
       .set_attr(tvm::op_attr::kFixedReturnType, PrimType::Void())
       .expose();
+  // Pure for the special registers that are fixed while a thread runs (laneid, smid, ctaid, ...).
+  // The time-varying ones (clock*, globaltimer*, pm*) are rejected by the CUDA codegen: two
+  // reads must not be merged, so they go through an opaque op such as T.cuda.clock64.
   RegisterDeviceIntrinsic(OpDef("tirx.cuda.mov_sreg"), CallEffectKind::kPure,
                           sig::arg<IntExpr>("bits"), sig::arg("reg_name"))
       .set_native_fn_attr<&InferTypeMovSreg>(tvm::op_attr::kInferType)

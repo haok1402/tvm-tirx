@@ -326,10 +326,12 @@ void RegisterCudaIntrinRules() {
       .set_attr(tvm::backend::cuda::op_attr::kNeedWarpShuffle, true)
       .expose();
 
+  // Not pure: the result is the set of lanes executing the call, so it must not be moved,
+  // merged or re-evaluated elsewhere (as tirx.gpu_warp_activemask, which lowers to it).
   OpDef("tirx.cuda.__activemask")
       .set_attr(tvm::op_attr::kFixedReturnType, PrimType::UInt(32))
       .set_attr(tvm::tirx::op_attr::kGlobalSymbol, "__activemask")
-      .set_attr(tvm::op_attr::kCallEffectKind, CallEffectKind::kPure)
+      .set_attr(tvm::op_attr::kCallEffectKind, CallEffectKind::kOpaque)
       .set_attr(tvm::backend::cuda::op_attr::kNeedWarpShuffle, true)
       .expose();
   // clang-format on
