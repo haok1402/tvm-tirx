@@ -65,7 +65,8 @@ def test_can_prove_self_identity(dtype):
     ana = tvm_tirx.sym.Analyzer()
 
     n = tirx.Var("n", dtype)
-    assert ana.can_prove(n == n)
+    # IEEE 754: `n == n` is false when n is NaN, so it holds for integers only.
+    assert ana.can_prove(n == n) == (not dtype.startswith("float"))
 
 
 def test_can_prove_self_equal_to_self(dtype):
