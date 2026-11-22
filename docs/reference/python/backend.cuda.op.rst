@@ -88,6 +88,7 @@ Functions
    nvshmem_barrier_all
    tensormap_encode_tiled
    any_sync
+   arithmetic_fence
    ballot_sync
    bfloat1622float2
    bfloat162float
