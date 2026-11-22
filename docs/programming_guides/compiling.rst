@@ -83,6 +83,37 @@ lists replace the inherited list in full, so this example includes
 ``--use_fast_math`` again alongside the new flag. ``launch`` controls the
 thread configuration; ``backend_config`` controls compilation.
 
+Choosing the Floating-Point Mode
+--------------------------------
+
+By default, CUDA code is compiled with ``--use_fast_math``, which flushes f32
+subnormals to zero (``-ftz=true``), uses approximate division, square root and
+math functions, and contracts multiply-adds. A kernel ported from a library
+built without fast math, such as DeepGEMM or CUTLASS, should name its mode with
+``fp_mode`` instead of editing the argument lists:
+
+.. code-block:: python
+
+    T.device_entry(
+        launch=T.cuda.LaunchConfig(grid=T.ceildiv(n, 256), block=256),
+        backend_config={"cuda": {"fp_mode": "precise"}},
+    )
+
+- ``"fast"`` passes ``--use_fast_math``.
+- ``"precise"`` passes the compilers' own defaults: ``--ftz=false
+  --prec-div=true --prec-sqrt=true --fmad=true``.
+- A mapping of ``fast_math``, ``ftz``, ``prec_div``, ``prec_sqrt`` and ``fmad``
+  to booleans selects individual switches, e.g. ``{"fast_math": True, "ftz":
+  False}`` for fast math that keeps subnormals.
+
+``fp_mode`` composes with the argument lists. It removes the floating-point
+flags from inherited ``nvrtc`` / ``nvcc`` lists and keeps the rest, so a
+kernel's mode survives a target that sets ``nvrtc`` for another reason.
+``fp_mode`` can be set on the target, on a function's ``backend_config``
+attribute, or on a ``device_entry``. Two levels that set different modes, or a
+list that spells floating-point flags under an inherited ``fp_mode``, are an
+error. Without ``fp_mode``, the argument lists decide as before.
+
 Inspecting IR and CUDA
 ----------------------
 

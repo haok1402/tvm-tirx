@@ -44,4 +44,6 @@ Functions
    validate_backend_config
    default_backend_config
    resolve_backend_config
+   merge_backend_config
+   fp_mode_flags
    compiler_options
