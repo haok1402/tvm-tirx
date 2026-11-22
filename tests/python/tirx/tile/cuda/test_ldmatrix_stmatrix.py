@@ -46,12 +46,6 @@ from tvm_tirx.tirx.layout import ComposeLayout, S, TileLayout
 # Runs on Hopper too; tests that need sm_100 override this marker.
 pytestmark = pytest.mark.cuda_min_compute(9)
 
-# The x1 ldmatrix/stmatrix pattern fails to lower on every arch (KeyError 'm'
-# in tile/patterns/common.py). Strict xfail below compute 10.0.
-_X1_PATTERN_BUG = pytest.mark.xfail(
-    not env.has_cuda_compute(10), strict=True, reason="x1 pattern lowering: KeyError 'm'"
-)
-
 
 def _compile_src(kernel):
     target = tvm_tirx.target.Target("cuda")
@@ -386,7 +380,7 @@ _BUILDERS = {
 @pytest.mark.parametrize("scope", ["warp", "warpgroup", "cta"])
 @pytest.mark.parametrize("trans", [False, True])
 @pytest.mark.parametrize("direction", ["ld", "st"])
-@pytest.mark.parametrize("num", [pytest.param(1, marks=_X1_PATTERN_BUG), 2, 4])
+@pytest.mark.parametrize("num", [1, 2, 4])
 @pytest.mark.gpu
 @pytest.mark.skipif(not env.has_cuda_compute(9), reason="need cuda compute >= 9.0")
 def test_ldstmatrix(scope, trans, direction, num):
@@ -419,7 +413,7 @@ def test_ldstmatrix(scope, trans, direction, num):
 @pytest.mark.parametrize("scope", ["warp", "warpgroup", "cta"])
 @pytest.mark.parametrize("trans", [False, True])
 @pytest.mark.parametrize("direction", ["ld", "st"])
-@pytest.mark.parametrize("num", [pytest.param(1, marks=_X1_PATTERN_BUG), 2, 4])
+@pytest.mark.parametrize("num", [1, 2, 4])
 @pytest.mark.gpu
 @pytest.mark.skipif(not env.has_cuda_compute(9), reason="need cuda compute >= 9.0")
 def test_ldstmatrix_swizzle(scope, trans, direction, num):

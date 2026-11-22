@@ -42,12 +42,6 @@ from tvm_tirx.tirx.layout import S, TileLayout
 # Runs on Hopper too; tests that need sm_100 override this marker.
 pytestmark = pytest.mark.cuda_min_compute(9)
 
-# The single m16n8k8 tile (1, 1, 1, 8) fails to lower on every arch
-# (KeyError 'm' in tile/patterns/common.py). Strict xfail below compute 10.0.
-_K8_SINGLE_TILE_BUG = pytest.mark.xfail(
-    not env.has_cuda_compute(10), strict=True, reason="m16n8k8 single tile: KeyError 'm'"
-)
-
 _PTX_TYPE = {"float16": "f16", "bfloat16": "bf16", "float32": "f32", "int8": "s8", "int32": "s32"}
 
 
@@ -619,7 +613,7 @@ _TILED_SHAPES = [
     (1, 1, 2, 16),  # two K-tiles (accumulated in place)
     (2, 2, 2, 16),  # every dim tiled
     (4, 1, 1, 16),  # M = 64
-    pytest.param(1, 1, 1, 8, marks=_K8_SINGLE_TILE_BUG),  # m16n8k8 single tile (kHi == 1)
+    (1, 1, 1, 8),  # m16n8k8 single tile (kHi == 1)
     (1, 1, 3, 8),  # K = 24 -> three k8 tiles
     (2, 2, 3, 8),  # k8, every dim tiled
 ]
@@ -717,7 +711,7 @@ def test_cuda_gemm_mma_numerical_transpose(transpose_A, transpose_B, dtype):
         (1, 1, 2, 16),  # K = 32 (two K-tiles, accumulated in place)
         (2, 2, 2, 16),  # 8 tiles
         (4, 1, 1, 16),  # M = 64
-        pytest.param(1, 1, 1, 8, marks=_K8_SINGLE_TILE_BUG),  # m16n8k8 single tile (kHi == 1)
+        (1, 1, 1, 8),  # m16n8k8 single tile (kHi == 1)
         (1, 1, 3, 8),  # K = 24 -> three k8 tiles (16 does not divide 24)
         (2, 2, 3, 8),  # k8, every dim tiled
     ],
@@ -742,7 +736,7 @@ def test_cuda_gemm_mma_lowers_tiled(Mt, Nt, Kt, kinst):
         (1, 1, 1, 16),
         (2, 2, 2, 16),
         (4, 1, 1, 16),
-        pytest.param(1, 1, 1, 8, marks=_K8_SINGLE_TILE_BUG),
+        (1, 1, 1, 8),
         (1, 1, 3, 8),
         (2, 2, 3, 8),
     ],
