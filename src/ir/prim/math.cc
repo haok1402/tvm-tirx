@@ -591,6 +591,26 @@ TVM_FFI_STATIC_INIT_BLOCK() {
       .set_attr(tvm::op_attr::kCallEffectKind, CallEffectKind::kPure)
       .expose();
 
+  OpDef("prim.fmax",
+        "IEEE 754 maxNum: the larger operand; if exactly one operand is NaN, the other. "
+        "Unlike max(), which propagates NaN, this maps to a single hardware min/max instruction "
+        "(fmaxf / PTX max.f32 / FMNMX on CUDA, llvm.maxnum on LLVM). Floating-point only.")
+      .signature(sig::arg<PrimExpr>("x1", "The first input value."),
+                 sig::arg<PrimExpr>("x2", "The second input value."))
+      .set_native_fn_attr<&InferTypeReturnArgType<0>>(tvm::op_attr::kInferType)
+      .set_attr(tvm::op_attr::kCallEffectKind, CallEffectKind::kPure)
+      .expose();
+
+  OpDef("prim.fmin",
+        "IEEE 754 minNum: the smaller operand; if exactly one operand is NaN, the other. "
+        "Unlike min(), which propagates NaN, this maps to a single hardware min/max instruction "
+        "(fminf / PTX min.f32 / FMNMX on CUDA, llvm.minnum on LLVM). Floating-point only.")
+      .signature(sig::arg<PrimExpr>("x1", "The first input value."),
+                 sig::arg<PrimExpr>("x2", "The second input value."))
+      .set_native_fn_attr<&InferTypeReturnArgType<0>>(tvm::op_attr::kInferType)
+      .set_attr(tvm::op_attr::kCallEffectKind, CallEffectKind::kPure)
+      .expose();
+
   OpDef("prim.hypot")
       .signature(sig::arg<PrimExpr>("x1", "The first input value."),
                  sig::arg<PrimExpr>("x2", "The second input value."))

@@ -119,6 +119,22 @@ struct CUDAFastMathTan : public CUDAMath {
   }
 };
 
+// NaN-ignoring (IEEE maxNum / minNum) float min and max: one FMNMX / HMNMX2 instruction.
+// CUDA's fmaxf/fmax and __hmax/__hmax2 return the non-NaN operand when exactly one is NaN.
+struct CUDAFMinMax {
+  std::string operator()(const PrimType& ty, std::string name) const {
+    std::string half = name == "fmax" ? "__hmax" : "__hmin";
+    bool is_half = (ty.MatchesCode(DLDataTypeCode::kDLFloat) && ty.bits() == 16) ||
+                   (ty.MatchesCode(DLDataTypeCode::kDLBfloat) && ty.bits() == 16);
+    if (ty.lanes() == 2 && is_half) return half + "2";
+    if (ty.lanes() != 1) return "";
+    if (is_half) return half;
+    if (ty.MatchesCode(DLDataTypeCode::kDLFloat) && ty.bits() == 32) return name + 'f';
+    if (ty.MatchesCode(DLDataTypeCode::kDLFloat) && ty.bits() == 64) return name;
+    return "";
+  }
+};
+
 struct CUDAPopcount {
   std::string operator()(const PrimType& ty, std::string name) const {
     if (ty.MatchesCode(DLDataTypeCode::kDLUInt)) {
@@ -202,6 +218,12 @@ void RegisterCudaIntrinRules() {
 
   OpDef("prim.exp2")
       .set_attr<FLowerIntrinsic>("cuda.FLowerIntrinsic", DispatchPureExtern<CUDAMath>);
+
+  OpDef("prim.fmax")
+      .set_attr<FLowerIntrinsic>("cuda.FLowerIntrinsic", DispatchPureExtern<CUDAFMinMax>);
+
+  OpDef("prim.fmin")
+      .set_attr<FLowerIntrinsic>("cuda.FLowerIntrinsic", DispatchPureExtern<CUDAFMinMax>);
 
   OpDef("prim.exp10")
       .set_attr<FLowerIntrinsic>("cuda.fastmath.FLowerIntrinsic", DispatchPureExtern<CUDAFastMath>)

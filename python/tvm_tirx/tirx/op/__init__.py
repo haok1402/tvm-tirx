@@ -74,6 +74,8 @@ from tvm_tirx.ir.prim.op import floor as floor
 from tvm_tirx.ir.prim.op import floordiv as floordiv
 from tvm_tirx.ir.prim.op import floormod as floormod
 from tvm_tirx.ir.prim.op import fma as fma
+from tvm_tirx.ir.prim.op import fmax as fmax
+from tvm_tirx.ir.prim.op import fmin as fmin
 from tvm_tirx.ir.prim.op import fmod as fmod
 from tvm_tirx.ir.prim.op import hypot as hypot
 from tvm_tirx.ir.prim.op import if_then_else as if_then_else
