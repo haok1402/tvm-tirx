@@ -207,11 +207,12 @@ def _find_cuda_target_include(cuda_path):
 
 
 # Source that needs libcu++: a std:: type trait beyond is_same (which the generated header
-# defines itself), or any cuda::std:: facility other than the <cuda/std/cstdint> typedefs that the
-# preamble and header name themselves (e.g. cuda::std::is_same_v, cuda::std::numeric_limits).
+# defines itself), or any mention of the cuda::std namespace other than the <cuda/std/cstdint>
+# typedefs that the preamble and header name themselves: cuda::std::numeric_limits, but also
+# `using namespace cuda::std;` and `namespace cs = cuda::std;`.
 _NEEDS_LIBCUXX = re.compile(
     r"\bstd::(is_integral|is_signed|is_unsigned|is_floating_point|enable_if|conditional)\b"
-    r"|\bcuda::std::(?!u?int(?:8|16|32|64)_t\b)\w"
+    r"|\bcuda\s*::\s*std\b(?!\s*::\s*u?int(?:8|16|32|64)_t\b)"
 )
 
 
