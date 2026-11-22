@@ -194,6 +194,46 @@ def test_none_layout_views_keep_offsets_and_strides():
         assert root.same_as(source)
 
 
+def test_explicit_layout_view_keeps_source_offset():
+    """An explicit view layout addresses the view's elements, which start at the source offset."""
+
+    def first_address(view):
+        return int(view.layout.apply(*([0] * len(view.shape)), shape=view.shape).get("m", 0))
+
+    with IRBuilder():
+        with I.function():
+            value = I.decl_tensor(
+                I.ptr("float32"),
+                ty_args=[I.Tensor((8, 16), "float32", layout=T.TileLayout(T.S[(8, 16)] + (7)))],
+            )
+            source = tvm_tirx.ir.Var("source", value.ty)
+            I.emit_(I.Bind(source, value))
+            words = source.sub[2:4, 3:7].view(2, 2, 2, layout=TileLayout(S[(2, 2, 2) : (16, 2, 1)]))
+            assert first_address(words) == 7 + 2 * 16 + 3
+            assert int(words.layout.apply(1, 1, 1, shape=words.shape)["m"]) == 42 + 16 + 2 + 1
+            offset = words.view(4, 2, layout=TileLayout(S[(4, 2) : (2, 1)] + (5)))
+            assert first_address(offset) == 42 + 5
+
+            swizzled_value = I.decl_tensor(
+                I.ptr("float16", "shared"),
+                ty_args=[
+                    I.Tensor(
+                        (2, 64, 64),
+                        "float16",
+                        scope="shared",
+                        layout=T.ComposeLayout(1, 3, 3, T.TileLayout(T.S[(2, 64, 64)]), 3),
+                    )
+                ],
+            )
+            swizzled = tvm_tirx.ir.Var("swizzled", swizzled_value.ty)
+            I.emit_(I.Bind(swizzled, swizzled_value))
+            rows = swizzled.sub[1, 8:16, :]
+            explicit = rows.view(
+                8, 64, layout=T.ComposeLayout(1, 3, 3, T.TileLayout(T.S[(8, 64)]), 3)
+            )
+            assert int(explicit.layout.tile_layout.offset[Axis.m]) == 64 * 64 + 8 * 64
+
+
 @pytest.mark.parametrize(
     "dtype,new_dtype,old_shape,new_shape",
     [
