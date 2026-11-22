@@ -19,6 +19,7 @@
 
 from __future__ import annotations
 
+import re
 from enum import Enum
 from functools import cache
 
@@ -369,6 +370,25 @@ def ptx_cp_async_legacy(
     return _cp_async_raw(dst_ptr, 0, src_ptr, 0, cp_size, ty=ty, loc=loc)
 
 
+# Special registers whose value changes while a thread runs (PTX ISA 10). tirx.cuda.mov_sreg is
+# registered pure, so the simplifier may merge two reads or move one: `t1 - t0` of two %clock
+# reads folds to 0. These are rejected; the rest (laneid, smid, ctaid, ...) are fixed per thread.
+_TIME_VARYING_SREGS = re.compile(
+    r"^(clock|clock_hi|clock64|globaltimer|globaltimer_lo|globaltimer_hi|pm[0-7](_64)?)$"
+)
+
+
+def check_mov_sreg_register(reg_name: str) -> None:
+    """Reject a time-varying special register for the pure ``mov_sreg``."""
+    name = str(reg_name).lstrip("%")
+    if _TIME_VARYING_SREGS.match(name):
+        raise ValueError(
+            f"T.cuda.mov_sreg is pure and cannot read the time-varying register %{name}: two "
+            f"reads could be merged or moved. Use T.cuda.clock64() for the cycle counter, or a "
+            f"T.cuda.func_call helper with asm volatile"
+        )
+
+
 def mov_sreg(bits, reg_name, *, ty=None, loc: Location = UNKNOWN_LOC):
     """TVM intrinsic to tvm instrinsics to fetch PTX pre-defined registers
 
@@ -385,6 +405,8 @@ def mov_sreg(bits, reg_name, *, ty=None, loc: Location = UNKNOWN_LOC):
     call : Expr
         The call expression.
     """
+    if isinstance(reg_name, str | StringImm):
+        check_mov_sreg_register(reg_name.value if isinstance(reg_name, StringImm) else reg_name)
     return Call(
         "tirx.cuda.mov_sreg",
         [bits, reg_name],

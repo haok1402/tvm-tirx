@@ -30,7 +30,7 @@ import re
 import tvm_ffi
 
 from tvm_tirx import ir
-from tvm_tirx.backend.cuda.op import func_call
+from tvm_tirx.backend.cuda.op import check_mov_sreg_register, func_call
 from tvm_tirx.runtime import MemoryScope
 
 from ..codegen.registry import CODEGEN_REGISTRY, register_codegen
@@ -462,6 +462,7 @@ del _bits
 def codegen_cuda_mov_sreg(bits, reg):
     bits = int(bits)
     reg = parse_str(reg)
+    check_mov_sreg_register(reg)
     if bits not in (32, 64):
         raise ValueError(f"Only support 32/64 bits for mov_sreg, but got {bits}.")
     result = CODEGEN_REGISTRY[f"tirx.cuda.mov_sreg_{bits}"]([reg])
