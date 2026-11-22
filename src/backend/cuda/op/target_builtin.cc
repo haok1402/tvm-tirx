@@ -236,6 +236,10 @@ void RegisterDeviceIntrinsics() {
   RegisterDeviceIntrinsic(OpDef("tirx.cuda.clock64"), CallEffectKind::kOpaque)
       .set_attr(tvm::op_attr::kFixedReturnType, PrimType::UInt(64))
       .expose();
+  // %globaltimer, the 64-bit nanosecond timer; opaque like clock64, so reads are never merged.
+  RegisterDeviceIntrinsic(OpDef("tirx.cuda.globaltimer"), CallEffectKind::kOpaque)
+      .set_attr(tvm::op_attr::kFixedReturnType, PrimType::UInt(64))
+      .expose();
   RegisterDeviceIntrinsic(OpDef("tirx.cuda.cluster_sync"), CallEffectKind::kOpaque)
       .set_attr(tvm::op_attr::kFixedReturnType, PrimType::Void())
       .expose();
@@ -339,7 +343,7 @@ void RegisterDeviceIntrinsics() {
       .expose();
   // Pure for the special registers that are fixed while a thread runs (laneid, smid, ctaid, ...).
   // The time-varying ones (clock*, globaltimer*, pm*) are rejected by the CUDA codegen: two
-  // reads must not be merged, so they go through an opaque op such as T.cuda.clock64.
+  // reads must not be merged, so they go through T.cuda.clock64 / T.cuda.globaltimer.
   RegisterDeviceIntrinsic(OpDef("tirx.cuda.mov_sreg"), CallEffectKind::kPure,
                           sig::arg<IntExpr>("bits"), sig::arg("reg_name"))
       .set_native_fn_attr<&InferTypeMovSreg>(tvm::op_attr::kInferType)

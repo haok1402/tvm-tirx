@@ -83,6 +83,7 @@ Functions
    fmul2_rn
    fp8x4_e4m3_from_float4
    get_tmem_addr
+   globaltimer
    grid_dim
    grid_sync
    half2float

@@ -69,6 +69,17 @@ def _clock64(out: T.Tensor((1,), "int64"), a: T.Tensor((1024,), "float32")):
     out[0] = t1 - t0
 
 
+@T.function
+def _globaltimer(out: T.Tensor((4,), "uint64"), a: T.Tensor((4096,), "float32")):
+    T.device_entry(launch=T.cuda.LaunchConfig(grid=1, block=1))
+    acc = T.local_scalar("float32", T.float32(0))
+    for k in T.serial(4):
+        out[k] = T.cuda.globaltimer()  # one read per iteration, after the previous work
+        for i in T.serial(1024):
+            acc = acc + a[k * 1024 + i]
+    a[0] = acc
+
+
 def test_activemask_is_not_rematerialized():
     _, src = _compile(_activemask)
     assert src.count("__activemask()") == 1, src
@@ -84,6 +95,26 @@ def test_clock64_reads_are_not_merged():
     _, src = _compile(_clock64)
     assert src.count("clock64") >= 2, src
     assert "out_ptr[0] = (int64_t)0" not in src and "out_ptr[0] = 0" not in src, src
+
+
+def test_globaltimer_read_stays_in_the_loop():
+    _, src = _compile(_globaltimer)
+    loop = src.index("for (int k")
+    assert src.count("tvm_builtin_globaltimer()") == 1, src
+    assert src.index("tvm_builtin_globaltimer()") > loop, src
+
+
+@pytest.mark.parametrize(
+    "reg, replacement",
+    [
+        ("globaltimer", "T.cuda.globaltimer"),
+        ("globaltimer_lo", "T.cuda.globaltimer"),
+        ("clock", "T.cuda.clock64"),
+    ],
+)
+def test_mov_sreg_points_to_the_opaque_reader(reg, replacement):
+    with pytest.raises(ValueError, match=replacement):
+        T.cuda.mov_sreg(32, reg)
 
 
 @pytest.mark.parametrize("reg", ["clock", "%clock", "clock_hi", "clock64", "globaltimer", "pm0"])
@@ -132,6 +163,18 @@ def test_clock64_interval_is_positive():
     out = tvm_tirx.runtime.tensor(np.zeros(1, "int64"), device=dev)
     mod(out, tvm_tirx.runtime.tensor(np.ones(1024, "float32"), device=dev))
     assert out.numpy()[0] > 0
+
+
+@pytest.mark.gpu
+@pytest.mark.skipif(not env.has_cuda_compute(9), reason="needs an sm_90 or newer GPU")
+def test_globaltimer_is_monotone():
+    mod, _ = _compile(_globaltimer, env.cuda_arch())
+    dev = tvm_tirx.cuda(0)
+    out = tvm_tirx.runtime.tensor(np.zeros(4, "uint64"), device=dev)
+    mod(out, tvm_tirx.runtime.tensor(np.ones(4096, "float32"), device=dev))
+    t = out.numpy().astype("int64")
+    assert (np.diff(t) >= 0).all(), t
+    assert t[-1] > t[0], t
 
 
 if __name__ == "__main__":
