@@ -14,7 +14,7 @@
 # KIND, either express or implied.  See the License for the
 # specific language governing permissions and limitations
 # under the License.
-"""Generate ``floors_generated.py``: which CUDA archs accept each PTX table variant.
+"""Generate ``floors_nvrtc_<major>_<minor>.py``: which CUDA archs accept each PTX table variant.
 
     python -m tvm_tirx.backend.cuda.ptx.gen_floors [--jobs N] [--families a,b] [--out PATH]
 
@@ -35,7 +35,8 @@ predication or immediate values, so one rendering per token combination suffices
 
 Measured, not derived: ptxas is the ground truth for what compiles today, including the ``a``/``f``
 suffix rules. ``floors.py`` turns the result into a check that can only reject what this toolchain
-rejects. Regenerate after changing the table or the NVRTC version.
+rejects. Each NVRTC version gets its own data module; regenerate every recorded one after changing
+the table.
 
 Each helper is wrapped in its own ``__global__`` certification kernel, so a ptxas error's PTX line
 number identifies the failing variant: the ``.entry`` that contains the line. Failing variants are
@@ -400,16 +401,19 @@ def main(argv=None):
     )
     parser.add_argument("--families", default=None, help="comma-separated subset (default: all)")
     parser.add_argument(
-        "--out", default=None, help="output path (default: ptx/floors_generated.py)"
+        "--out",
+        default=None,
+        help="output path (default: ptx/floors_nvrtc_<major>_<minor>.py for this NVRTC)",
     )
     args = parser.parse_args(argv)
-    out = args.out or os.path.join(os.path.dirname(__file__), "floors_generated.py")
     families = args.families.split(",") if args.families else None
     from tvm_tirx.backend.cuda.ptx.toolchain import current_toolchain  # pylint: disable=import-outside-toplevel
 
     toolchain = current_toolchain()
     if toolchain is None or toolchain["cudart_headers"] is None:
         raise SystemExit("gen_floors: cannot determine the NVRTC / CUDA header versions")
+    major, minor = toolchain["nvrtc"]
+    out = args.out or os.path.join(os.path.dirname(__file__), f"floors_nvrtc_{major}_{minor}.py")
     result = generate(families, jobs=args.jobs, cache=args.cache)
     write(result, out, toolchain)
     print(f"gen_floors: wrote {len(result)} families to {out}", file=sys.stderr)

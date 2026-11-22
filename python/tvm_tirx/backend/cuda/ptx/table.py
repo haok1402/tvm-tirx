@@ -423,7 +423,7 @@ class InstructionEntry:
     # then get baked into a check() and silently delete coverage.
     cert_arch: str | None = None
     # Which CUDA archs accept a variant, for the VerifyPTXTarget check (``floors.py``). None, the
-    # default, uses the measured data in ``floors_generated.py``. A family sets this only where
+    # default, uses the measured data in ``floors_nvrtc_*.py``. A family sets this only where
     # the ISA is stricter than ptxas: ``floor(mod_map)`` returns the frozenset of accepting archs,
     # or None for "unknown". No family overrides it today.
     floor: Callable[[dict], frozenset[str] | None] | None = None
