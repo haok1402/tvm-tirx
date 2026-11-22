@@ -18,7 +18,7 @@
 
 Every ``tirx.ptx.<family>`` call in a CUDA device function is decoded as codegen decodes it
 (``ptx.engine._make_codegen``: the modifier tokens sit just before the trailing flag marker). It is
-checked against the measured per-variant floors in ``ptx/floors_generated.py``. Without this, a
+checked against the measured per-variant floors in ``ptx/floors_nvrtc_*.py``. Without this, a
 kernel written for sm_100 and compiled for sm_90a fails deep inside NVRTC, as a PTX line number with
 no TIRx location; with it, it fails here, naming the instruction and the TIRx source line.
 

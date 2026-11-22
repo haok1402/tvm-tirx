@@ -20,7 +20,6 @@ import pytest
 
 import tvm_tirx
 from tvm_tirx.backend.cuda.ptx import floors
-from tvm_tirx.backend.cuda.ptx.floors_generated import ARCHS, FLOORS
 from tvm_tirx.backend.cuda.ptx.gen_floors import measured_families
 from tvm_tirx.backend.cuda.ptx.table import TABLE, variants
 from tvm_tirx.backend.cuda.transform import PTXTargetError, VerifyPTXTarget
@@ -31,10 +30,15 @@ def _target(arch):
     return tvm_tirx.target.Target({"kind": "cuda", "arch": arch})
 
 
+#: The data set the checks below run against: the first recorded toolchain's.
+DATA = floors.datasets()[0]
+ARCHS, FLOORS = DATA.ARCHS, DATA.FLOORS
+
+
 @pytest.fixture(autouse=True)
 def measured_toolchain(monkeypatch):
     """The checks below are about the floor data, not about this host's NVRTC version."""
-    monkeypatch.setattr(floors, "toolchain_matches", lambda: True)
+    monkeypatch.setattr(floors, "dataset", lambda: DATA)
 
 
 @pytest.fixture
@@ -48,7 +52,17 @@ def no_nvrtc(monkeypatch):
     monkeypatch.setattr(compiler, "compile_source", unreachable)
 
 
-def test_floor_data_is_consistent_with_the_table():
+def test_each_toolchain_has_one_data_set():
+    toolchains = [data.TOOLCHAIN for data in floors.datasets()]
+    assert toolchains and len({repr(t) for t in toolchains}) == len(toolchains)
+    for data in floors.datasets():
+        major, minor = data.TOOLCHAIN["nvrtc"]
+        assert data.__name__.rsplit(".", 1)[1] == f"floors_nvrtc_{major}_{minor}"
+
+
+@pytest.mark.parametrize("data", floors.datasets(), ids=lambda d: d.__name__.rsplit(".", 1)[1])
+def test_floor_data_is_consistent_with_the_table(data):
+    ARCHS, FLOORS = data.ARCHS, data.FLOORS
     assert len(set(ARCHS)) == len(ARCHS) and len(ARCHS) < 64
     assert set(FLOORS) <= set(measured_families(TABLE))
     for family, (slots, table) in FLOORS.items():
@@ -189,20 +203,31 @@ def test_call_site_chains_name_the_kernel_line():
     assert _location(Node(UnknownLoc())) is None
 
 
+def test_the_matching_toolchain_selects_its_data(monkeypatch):
+    monkeypatch.undo()  # drop the autouse pin
+    try:
+        for data in floors.datasets():
+            monkeypatch.setattr(floors, "current_toolchain", lambda data=data: data.TOOLCHAIN)
+            floors.dataset.cache_clear()
+            assert floors.dataset() is data and floors.toolchain_matches()
+    finally:
+        floors.dataset.cache_clear()
+
+
 def test_another_toolchain_disables_the_check(monkeypatch):
     """Floors measured with one NVRTC / header version must not reject under another."""
-    from tvm_tirx.backend.cuda.ptx.floors_generated import TOOLCHAIN
-
     monkeypatch.undo()  # drop the autouse pin
-    other = {**TOOLCHAIN, "nvrtc": (TOOLCHAIN["nvrtc"][0], TOOLCHAIN["nvrtc"][1] + 1)}
+    recorded = {repr(data.TOOLCHAIN) for data in floors.datasets()}
+    other = {"nvrtc": (99, 9), "cudart_headers": 990090}
+    assert repr(other) not in recorded
     monkeypatch.setattr(floors, "current_toolchain", lambda: other)
-    floors.toolchain_matches.cache_clear()
+    floors.dataset.cache_clear()
     try:
         entry = TABLE["tcgen05_fence"]
         with pytest.warns(UserWarning, match="VerifyPTXTarget is disabled"):
             assert floors.rejection(entry, next(iter(variants(entry))), "sm_90a") is None
     finally:
-        floors.toolchain_matches.cache_clear()
+        floors.dataset.cache_clear()
 
 
 @pytest.mark.parametrize(
