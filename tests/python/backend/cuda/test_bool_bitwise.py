@@ -20,7 +20,8 @@ C `&&` / `||` hand NVRTC a branch to lower. For a per-register mask such as
 ``(a || b) ? -inf : x`` it can keep one divergent branch region per statement instead of a
 predicated select (sm90-probe ISSUE-017). The LLVM backend already evaluates both operands.
 Operands that could fault or be undefined when the guard excludes them keep the short-circuit
-form: global and shared loads, division or shifts by a variable, impure calls.
+form: global and shared loads, division or shifts by a variable, impure calls, and warp
+collectives (whose result depends on which lanes execute them).
 """
 
 import re
@@ -121,6 +122,47 @@ def test_constant_divisor_and_shift_use_bitwise(kind):
     _, src = _compile(main)
     assert re.search(r"\) & \(", src), src
     assert "&&" not in src, src
+
+
+def _warp_kernel(kind):
+    # The warp collective is the operand that the first compare guards, inside a divergent branch:
+    # only even lanes below 16 reach it. Evaluated unconditionally it would run on more lanes.
+    @T.function
+    def main(out: T.Tensor((32,), "int32")):
+        T.device_entry(launch=T.cuda.LaunchConfig(grid=1, block=32))
+        tid = T.cuda.thread_idx("x")
+        out[tid] = T.int32(-1)
+        if tid < 16:
+            if T.constexpr(kind == "activemask"):
+                # A lane that runs __activemask is in its own mask.
+                lane_bit = T.shift_left(T.uint32(1), T.Cast("uint32", tid))
+                ok = T.And(tid % 2 == 0, T.bitwise_and(T.cuda.__activemask(), lane_bit) != 0)
+            else:
+                ok = T.Or(tid % 2 == 1, T.cuda.any_sync(T.uint32(0x5555), tid % 2 == 0) != 0)
+            out[tid] = T.Select(ok, T.int32(1), T.int32(0))
+
+    return main
+
+
+@pytest.mark.parametrize("kind", ["activemask", "any_sync"])
+def test_warp_collectives_keep_short_circuit(kind):
+    _, src = _compile(_warp_kernel(kind))
+    assert ("&&" if kind == "activemask" else "||") in src, src
+
+
+@pytest.mark.gpu
+@pytest.mark.skipif(not env.has_cuda_compute(9), reason="needs an sm_90 or newer GPU")
+@pytest.mark.parametrize("kind", ["activemask", "any_sync"])
+def test_warp_collectives_run(kind):
+    mod, _ = _compile(_warp_kernel(kind), env.cuda_arch())
+    out = tvm_tirx.runtime.tensor(np.zeros(32, "int32"), device=tvm_tirx.cuda(0))
+    mod(out)
+    tid = np.arange(32)
+    # Even lanes below 16 take the collective and get 1; odd lanes below 16 get 0 (activemask)
+    # or 1 (any_sync's Or short-circuits on them); lanes 16 and up never enter the branch.
+    second = (tid % 2 == 0) if kind == "activemask" else np.ones(32, bool)
+    expected = np.where(tid < 16, second.astype("int32"), -1)
+    np.testing.assert_array_equal(out.numpy(), expected)
 
 
 @pytest.mark.gpu

@@ -838,7 +838,8 @@ void CodeGenCUDA::Dispatch_(const prim::ModObj* op, std::ostream& os) {
 // guard: it has no side effect, and nothing in it can fault or be undefined for operand values
 // that the guard might have excluded. Allowed: constants, variables, arithmetic, comparisons,
 // casts, selects, division and remainder by a constant other than 0 and -1, shifts by an in-range
-// constant, pure calls, and loads from a per-thread array at a constant in-range index.
+// constant, pure calls other than warp collectives, and loads from a per-thread array at a
+// constant in-range index.
 bool CodeGenCUDA::IsSafeToSpeculate(const PrimExpr& e) const {
   auto const_int = [](const PrimExpr& x) -> std::optional<int64_t> {
     const auto* imm = x.as<IntImmObj>();
@@ -901,6 +902,11 @@ bool CodeGenCUDA::IsSafeToSpeculate(const PrimExpr& e) const {
     if (!op->op.as<Op>() || effects.get(op->op, CallEffectKind::kOpaque) != CallEffectKind::kPure) {
       return false;
     }
+    // A warp collective's result depends on which lanes execute it, so evaluating it
+    // unconditionally changes it. __activemask and any_sync are registered pure; any_sync
+    // carries no kNeedWarpShuffle flag, so it is named here.
+    static const Op any_sync = Op::Get("tirx.cuda.any_sync");
+    if (op_need_warp_shuffle_.get(op->op, false) || op->op.same_as(any_sync)) return false;
     for (const Expr& arg : op->args) {
       if (arg.as<StringImmObj>()) continue;
       auto prim_arg = arg.as<PrimExpr>();
