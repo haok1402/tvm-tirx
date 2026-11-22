@@ -799,7 +799,20 @@ class Z3Prover::Impl final : tvm::ExprFunctor<z3::expr(const Expr&)> {
   z3::expr Dispatch_(const prim::CastObj* op) override {
     // if the inner dtype is valid, we just visit it
     if (IsZ3SupportedExpr(op->value.get()) && IsZ3SupportedExpr(op)) {
-      return VisitInt(op->value);
+      z3::expr value = VisitInt(op->value);
+      PrimType target = op->ty.as_or_throw<PrimType>();
+      ConstIntBound bound = analyzer->const_int_bound(op->value);
+      if (!detail::IntegerCastMayWrap(op->value.ty(), target, bound->min_value,
+                                      bound->max_value)) {
+        return value;
+      }
+      // The cast reinterprets bits (uint32 -> int32, int -> uint): it wraps modulo 2^bits.
+      if (target.MatchesCode(DLDataTypeCode::kDLBool)) return value != ctx->int_val(0);
+      z3::expr modulus = IntegerValue(*ctx, ffi::BigInt(1) << target.bits());
+      z3::expr wrapped = z3::mod(value, modulus);  // Euclidean: in [0, 2^bits)
+      if (target.MatchesCode(DLDataTypeCode::kDLUInt)) return wrapped;
+      z3::expr half = IntegerValue(*ctx, ffi::BigInt(1) << (target.bits() - 1));
+      return z3::ite(wrapped >= half, wrapped - modulus, wrapped);
     } else {
       // otherwise, we create a new free z3 variable
       return Create(op);

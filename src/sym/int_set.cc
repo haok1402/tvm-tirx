@@ -582,6 +582,17 @@ class IntervalSetEvaluator : public tvm::ExprFunctor<IntervalSet(const Expr&)> {
       return IntervalSet::SinglePoint(
           prim::cast(value_set->min_value, op->ty.as_or_throw<PrimType>()));
     }
+    int64_t lo = value_set->HasLowerBound()
+                     ? analyzer_->const_int_bound(value_set->min_value)->min_value
+                     : ConstIntBound::kNegInf;
+    int64_t hi = value_set->HasUpperBound()
+                     ? analyzer_->const_int_bound(value_set->max_value)->max_value
+                     : ConstIntBound::kPosInf;
+    if (detail::IntegerCastMayWrap(op->value.ty(), op->ty.as_or_throw<PrimType>(), lo, hi)) {
+      // The cast reinterprets bits and may wrap, so the bounds of the source do not map to
+      // the bounds of the result.
+      return IntervalSet::Everything();
+    }
     PrimExpr min_value = value_set->HasLowerBound()
                              ? prim::cast(value_set->min_value, op->ty.as_or_throw<PrimType>())
                              : prim::neg_inf();
