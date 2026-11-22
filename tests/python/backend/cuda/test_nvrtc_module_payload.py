@@ -112,6 +112,16 @@ CUDA_STD_SRC = {
         "__device__ __forceinline__ int tirx_test_cuda_std(int x) "
         "{ return x < cuda::std::numeric_limits<int>::max() ? x : 0; }\n"
     ),
+    "using_namespace": (
+        "using namespace cuda::std;\n"
+        "__device__ __forceinline__ int tirx_test_cuda_std(int x) "
+        "{ return x < numeric_limits<int>::max() ? x : 0; }\n"
+    ),
+    "namespace_alias": (
+        "namespace cs = cuda::std;\n"
+        "__device__ __forceinline__ int tirx_test_cuda_std(int x) "
+        "{ return x < cs::numeric_limits<int>::max() ? x : 0; }\n"
+    ),
 }
 
 
