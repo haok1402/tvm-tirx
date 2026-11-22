@@ -165,6 +165,7 @@ python_functions = ["test_*"]
 markers = [
   "gpu: Mark a test as requiring a GPU",
   "cuda_arch(*arches, device='cuda0'): Require one of the exact CUDA runtime architectures",
+  "cuda_min_compute(major, minor=0): Lowest CUDA compute capability the test runs on; honoured only by the codegen and tile/cuda collection gates, whose default is 10.0",
 ]
 
 [tool.cibuildwheel]

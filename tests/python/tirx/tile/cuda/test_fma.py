@@ -32,6 +32,9 @@ from tvm_tirx.script import tirx as T
 from tvm_tirx.testing import env
 from tvm_tirx.tirx.layout import S, TileLayout
 
+# Runs on Hopper too; tests that need sm_100 override this marker.
+pytestmark = pytest.mark.cuda_min_compute(9)
+
 
 def _splat_f32(value):
     """Prepare the two equal f32 fields of a native b64 packed operand."""
@@ -197,6 +200,7 @@ def test_fma_no_layout(layout):
 
 @pytest.mark.gpu
 @pytest.mark.skipif(not env.has_cuda(), reason="need cuda")
+@pytest.mark.cuda_min_compute(10)  # needs sm_100: packed fma.f32x2
 def test_fma_warpgroup_thread_row_layout():
     rows, cols = 128, 8
     dtype = "float32"

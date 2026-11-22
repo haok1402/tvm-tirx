@@ -35,6 +35,9 @@ from tvm_tirx.script import tirx as T
 from tvm_tirx.testing import env
 from tvm_tirx.tirx.layout import S, TileLayout
 
+# Runs on Hopper too; tests that need sm_100 override this marker.
+pytestmark = pytest.mark.cuda_min_compute(9)
+
 
 def _r_layout(scope, shape):
     if scope == "warpgroup":
@@ -806,6 +809,7 @@ def test_reg_copy_tcgen05_d_epilogue_deposit_layout_pairing():
 
 @pytest.mark.gpu
 @pytest.mark.skipif(not env.has_cuda_compute(9), reason="need cuda compute >= 9.0")
+@pytest.mark.cuda_min_compute(10)  # needs sm_100: tcgen05 epilogue layout
 def test_reg_copy_tcgen05_d_epilogue_deposit_codegen():
     # Each lane owns 32 fp32 values. Its sixteen 64-bit stores must all survive.
     ex = _compile_tcgen05_d_epilogue_deposit()

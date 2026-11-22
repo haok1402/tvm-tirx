@@ -25,6 +25,9 @@ from tvm_tirx.ir.prim.vector_expr import Broadcast
 from tvm_tirx.script import tirx as T
 from tvm_tirx.testing import env
 
+# Runs on Hopper too; tests that need sm_100 override this marker.
+pytestmark = pytest.mark.cuda_min_compute(9)
+
 TARGET = tvm_tirx.target.Target({"kind": "cuda", "arch": env.cuda_arch() or "sm_90"})
 
 

@@ -131,7 +131,8 @@ def test_tmem_alloc_dealloc_relinquish():
 
 
 @pytest.mark.gpu
-@pytest.mark.skipif(not env.has_cuda_compute(10), reason="need cuda compute >= 10.0")
+@pytest.mark.cuda_min_compute(9)  # mbarrier / mapa / expect_tx: sm_90 features
+@pytest.mark.skipif(not env.has_cuda_compute(9), reason="need cuda compute >= 9.0")
 def test_mbarrier_try_wait_once_codegen():
     # fmt: off
     @T.function
@@ -156,7 +157,8 @@ def test_mbarrier_try_wait_once_codegen():
 
 
 @pytest.mark.gpu
-@pytest.mark.skipif(not env.has_cuda_compute(10), reason="need cuda compute >= 10.0")
+@pytest.mark.cuda_min_compute(9)  # mbarrier / mapa / expect_tx: sm_90 features
+@pytest.mark.skipif(not env.has_cuda_compute(9), reason="need cuda compute >= 9.0")
 def test_mbarrier_remote_view_codegen():
     from tvm_tirx.backend.cuda.lang.pipeline import MBarrier
 
@@ -187,7 +189,8 @@ def test_mbarrier_remote_view_codegen():
 
 
 @pytest.mark.gpu
-@pytest.mark.skipif(not env.has_cuda_compute(10), reason="need cuda compute >= 10.0")
+@pytest.mark.cuda_min_compute(9)  # mbarrier / mapa / expect_tx: sm_90 features
+@pytest.mark.skipif(not env.has_cuda_compute(9), reason="need cuda compute >= 9.0")
 def test_mbarrier_local_arrive_forwards_predicate_and_count():
     from tvm_tirx.backend.cuda.lang.pipeline import MBarrier
 
@@ -219,7 +222,8 @@ def test_mbarrier_local_arrive_forwards_predicate_and_count():
 
 
 @pytest.mark.gpu
-@pytest.mark.skipif(not env.has_cuda_compute(10), reason="need cuda compute >= 10.0")
+@pytest.mark.cuda_min_compute(9)  # mbarrier / mapa / expect_tx: sm_90 features
+@pytest.mark.skipif(not env.has_cuda_compute(9), reason="need cuda compute >= 9.0")
 def test_tma_mbarrier_remote_view_codegen():
     from tvm_tirx.backend.cuda.lang.pipeline import TMABar
 

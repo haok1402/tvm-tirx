@@ -36,6 +36,9 @@ from tvm_tirx.script import tirx as T
 from tvm_tirx.testing import env
 from tvm_tirx.tirx.layout import S, TileLayout
 
+# Runs on Hopper too; tests that need sm_100 override this marker.
+pytestmark = pytest.mark.cuda_min_compute(9)
+
 
 @T.function(private=True)
 def half_divide(a: T.float16, b: T.float16) -> T.float16:
@@ -294,9 +297,17 @@ def test_binary_op_shared_subcta_scope(thread_scope, op_type):
 @pytest.mark.parametrize("thread_scope", ["cta", "warpgroup", "warp"])
 @pytest.mark.parametrize("rhs_kind", ["region", "broadcast", "const"])
 @pytest.mark.parametrize("op_type", ["add", "sub", "mul", "fdiv"])
-def test_binary_op_local_subcta_trivial(thread_scope, rhs_kind, op_type):
+def test_binary_op_local_subcta_trivial(request, thread_scope, rhs_kind, op_type):
     dtype = "float16"
     m, n = 4, 8
+    if rhs_kind == "broadcast" and op_type != "fdiv":
+        # Fails on every arch: view(dtype) of the width-1 broadcast operand needs a
+        # unit last-dim stride. Strict xfail below compute 10.0.
+        request.applymarker(
+            pytest.mark.xfail(
+                not env.has_cuda_compute(10), strict=True, reason="view(dtype) of a broadcast"
+            )
+        )
     n_threads = 256 if thread_scope == "cta" else (128 if thread_scope == "warpgroup" else 32)
     # in this test, use warp3/warpgroup1 to test
     thr_str = 0 if thread_scope == "cta" else (128 if thread_scope == "warpgroup" else 32 * 3)
@@ -622,6 +633,7 @@ def test_binary_op_packed_f32x2_explicit(op_type):
 @pytest.mark.gpu
 @pytest.mark.skipif(not env.has_cuda(), reason="need cuda")
 @pytest.mark.parametrize("op_name", ["add", "sub", "mul"])
+@pytest.mark.cuda_min_compute(10)  # needs sm_100: packed add/sub/mul.f32x2
 def test_binary_op_warpgroup_thread_row_layout(op_name):
     dtype = "float32"
     rows, cols = 128, 16
@@ -1018,6 +1030,7 @@ def test_binary_add_f16_scalar_fallback_dispatch():
     )
 
 
+@pytest.mark.cuda_min_compute(10)  # needs sm_100: tcgen05 16x256b atom
 def test_mul_tcgen05_16x256b_atom_warpgroup_dispatch():
     """Caller views expose the split lane/warp register atom as packed pairs."""
     rows, cols = 64, 64

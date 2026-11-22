@@ -33,6 +33,9 @@ import pytest
 import tvm_tirx
 from tvm_tirx.script import tirx as T
 
+# Runs on Hopper too; tests that need sm_100 override this marker.
+pytestmark = pytest.mark.cuda_min_compute(9)
+
 
 def build(func):
     target = tvm_tirx.target.Target({"kind": "cuda", "arch": "sm_100a"})

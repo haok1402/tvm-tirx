@@ -30,6 +30,9 @@ import tvm_tirx.testing
 from tvm_tirx.script import tirx as T
 from tvm_tirx.testing import env
 
+# Runs on Hopper too; tests that need sm_100 override this marker.
+pytestmark = pytest.mark.cuda_min_compute(9)
+
 
 def _get_source(func: tvm_tirx.tirx.Function) -> tuple[str, tvm_tirx.IRModule]:
     target = tvm_tirx.target.Target("cuda")
@@ -1258,6 +1261,9 @@ def test_wgmma_rs_nt():
 
         A_elems = math.prod(shapeA) // 128
         C_elems = math.prod(shapeC) // 128
+        # A fragment as 32-bit registers. A trace-time Python int: get_A_list
+        # needs it for range(), so it cannot be a T.meta_var inside the body.
+        A_elems_b32 = A_elems // (32 // in_dtype_bits)
 
         M, K = shapeA if not transA else shapeA[::-1]
         N, _ = shapeB if not transB else shapeB[::-1]
@@ -1305,7 +1311,6 @@ def test_wgmma_rs_nt():
             A_local = T.alloc_tensor(ty_args=[T.Tensor((A_elems,), in_dtype, scope="local")])
             C_local = T.alloc_tensor(ty_args=[T.Tensor((C_elems,), out_dtype, scope="local")])
 
-            A_elems_b32 = T.meta_var(A_elems // (32 // in_dtype_bits))
             A_local_b32 = T.decl_tensor(
                 A_local.data, ty_args=[T.Tensor((A_elems_b32,), "uint32", data=A_local.data)]
             )

@@ -25,6 +25,9 @@ import tvm_tirx.testing
 from tvm_tirx.script import tirx as T
 from tvm_tirx.testing import env
 
+# Runs on Hopper too; tests that need sm_100 override this marker.
+pytestmark = pytest.mark.cuda_min_compute(9)
+
 
 def _build_g2l2g_kernel(n_elements, dtype, load, store):
     @T.function

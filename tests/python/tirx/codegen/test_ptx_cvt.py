@@ -21,6 +21,9 @@ import pytest
 from tvm_tirx.backend.cuda.ptx.render import render_variant
 from tvm_tirx.backend.cuda.ptx.table import TABLE, mods, operand_dtypes, renderings, tokens_for
 
+# Runs on Hopper too; tests that need sm_100 override this marker.
+pytestmark = pytest.mark.cuda_min_compute(9)
+
 # (entry name, the modifier slots to write, the instruction that combination emits).
 # Slots are named, not positional: `tokens_for` shifts nothing when a slot is
 # inserted, rejects an unknown slot name, and refuses a combination the entry's

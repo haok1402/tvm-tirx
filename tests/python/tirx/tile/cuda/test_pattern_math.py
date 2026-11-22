@@ -27,6 +27,9 @@ from tvm_tirx.script import tirx as T
 from tvm_tirx.testing import env
 from tvm_tirx.tirx.layout import S, TileLayout
 
+# Runs on Hopper too; tests that need sm_100 override this marker.
+pytestmark = pytest.mark.cuda_min_compute(9)
+
 
 @pytest.mark.skipif(not env.has_cuda(), reason="CUDA required")
 @pytest.mark.parametrize("operation", ["exp", "silu", "sqrt", "log2", "exp2"])
@@ -70,9 +73,20 @@ def test_ewise_composite(operation):
     np.testing.assert_allclose(out.numpy(), operation(x) * 2 + 3, rtol=2e-5, atol=2e-5)
 
 
-@pytest.mark.skipif(not env.has_cuda_compute(10), reason="Blackwell packed operations required")
+@pytest.mark.skipif(not env.has_cuda_compute(9), reason="need cuda compute >= 9.0")
 @pytest.mark.parametrize(
-    "dtype,suffix", [("float16", "f16x2"), ("bfloat16", "bf16x2"), ("float32", "f32x2")]
+    "dtype,suffix",
+    [
+        ("float16", "f16x2"),
+        ("bfloat16", "bf16x2"),
+        pytest.param(
+            "float32",
+            "f32x2",
+            marks=pytest.mark.skipif(
+                not env.has_cuda_compute(10), reason="Blackwell packed operations required"
+            ),
+        ),
+    ],
 )
 @pytest.mark.parametrize("opcode,kind", [("add", "binary"), ("mul", "binary"), ("fma", "ternary")])
 def test_native_packed(dtype, suffix, opcode, kind):
