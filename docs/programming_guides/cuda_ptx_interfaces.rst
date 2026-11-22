@@ -80,6 +80,25 @@ The device helper calls CUDA's ``__shfl_xor_sync``:
 The :doc:`TMA Transfers guide </programming_guides/tile/tma>` shows a complete barrier
 initialization, arrival, and phase wait around an asynchronous transfer.
 
+Pinning the order of a sum
+~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+nvcc and NVRTC reassociate integer sums, whatever order the CUDA source writes
+them in. For an address, the order can matter: ptxas keeps warp-uniform address
+math on the uniform datapath only if the sum is formed from the uniform terms
+first. ``T.cuda.arithmetic_fence(x)`` returns ``x`` unchanged, but the compiler
+cannot see through it, so the fenced sum stays one value:
+
+.. code-block:: python
+
+    # row * stride and kv_offset are warp-uniform; lane_term differs per thread.
+    base = T.cuda.arithmetic_fence(row * stride + kv_offset)
+    out[base + lane_term] = value
+
+The fence is an empty inline asm: it emits no instruction, and the compiler can
+still hoist it or merge identical ones. It accepts 32- and 64-bit integers,
+``float32`` and ``float64``.
+
 .. _cuda-direct-ptx:
 
 Calling PTX Instructions

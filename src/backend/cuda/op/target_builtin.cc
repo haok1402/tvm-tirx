@@ -287,6 +287,12 @@ void RegisterDeviceIntrinsics() {
                           sig::arg<IntExpr>("mask"), sig::arg("pred"))
       .set_attr(tvm::op_attr::kFixedReturnType, PrimType::Int(32))
       .expose();
+  // Returns its operand unchanged through an empty asm, so nvcc/NVRTC cannot reassociate the
+  // arithmetic that produced it with the arithmetic that uses it (sm90-probe ISSUE-016).
+  RegisterDeviceIntrinsic(OpDef("tirx.cuda.arithmetic_fence"), CallEffectKind::kPure,
+                          sig::arg("value"))
+      .set_native_fn_attr<&InferTypeReturnArgType<0>>(tvm::op_attr::kInferType)
+      .expose();
   RegisterDeviceIntrinsic(OpDef("tirx.cuda.atomic_add"), CallEffectKind::kOpaque,
                           sig::arg("res_addr"), sig::arg("value"))
       .set_native_fn_attr<&InferTypeReturnArgType<1>>(tvm::op_attr::kInferType)

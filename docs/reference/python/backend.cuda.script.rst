@@ -55,6 +55,7 @@ Functions
    __shfl_xor_sync
    __activemask
    any_sync
+   arithmetic_fence
    ballot_sync
    bfloat1622float2
    bfloat162float

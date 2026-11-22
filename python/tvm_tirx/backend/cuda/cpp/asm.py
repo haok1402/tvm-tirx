@@ -469,6 +469,47 @@ def codegen_cuda_mov_sreg(bits, reg):
 
 
 # =============================================================================
+# arithmetic_fence — returns its operand through an empty asm with one inout
+# register. The asm emits no instruction, but nvcc/NVRTC cannot look through it,
+# so they cannot reassociate across it: ``fence(a + b) + c`` keeps ``a + b`` as
+# one sum. Not volatile and no clobber, so it can still be hoisted and CSE'd.
+# =============================================================================
+_ARITHMETIC_FENCE_TYPES = {
+    # dtype: (C type, asm constraint)
+    "int32": ("int", "r"),
+    "uint32": ("unsigned int", "r"),
+    "int64": ("long long", "l"),
+    "uint64": ("unsigned long long", "l"),
+    "float32": ("float", "f"),
+    "float64": ("double", "d"),
+}
+
+
+def _arithmetic_fence_type(value):
+    dtype = str(value.ty)
+    if dtype not in _ARITHMETIC_FENCE_TYPES:
+        raise ValueError(
+            f"T.cuda.arithmetic_fence supports {', '.join(_ARITHMETIC_FENCE_TYPES)}, "
+            f"but got {dtype}"
+        )
+    return dtype, *_ARITHMETIC_FENCE_TYPES[dtype]
+
+
+device_intrinsic(
+    "cuda.arithmetic_fence",
+    helper_name=lambda value: (
+        f"tvm_builtin_cuda_arithmetic_fence_{_arithmetic_fence_type(value)[0]}"
+    ),
+    c_signature=lambda value: f"({_arithmetic_fence_type(value)[1]} value)",
+    return_type=lambda value: _arithmetic_fence_type(value)[1],
+    tvm_return_type=lambda value: value.ty,
+    body=lambda value: (
+        f'    asm("" : "+{_arithmetic_fence_type(value)[2]}"(value));\n    return value;'
+    ),
+)
+
+
+# =============================================================================
 # wgmma_noop_barrier — empty asm with one inout register operand. Two
 # device_intrinsic calls, one per supported dtype; dispatcher picks the form
 # based on the operand's runtime dtype.
