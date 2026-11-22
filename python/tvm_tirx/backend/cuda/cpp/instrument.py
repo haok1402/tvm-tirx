@@ -184,3 +184,16 @@ device_intrinsic(
     return_type="unsigned long long",
     body="    return clock64();",
 )
+
+# %globaltimer: the 64-bit global nanosecond timer, read with asm volatile so no two reads are
+# merged (T.cuda.mov_sreg is pure and rejects it).
+device_intrinsic(
+    "cuda.globaltimer",
+    helper_name="tvm_builtin_globaltimer",
+    return_type="unsigned long long",
+    body=(
+        "    unsigned long long t;\n"
+        '    asm volatile("mov.u64 %0, %%globaltimer;" : "=l"(t));\n'
+        "    return t;"
+    ),
+)

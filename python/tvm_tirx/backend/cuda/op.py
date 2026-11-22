@@ -378,14 +378,21 @@ _TIME_VARYING_SREGS = re.compile(
 )
 
 
+def _sreg_replacement(name: str) -> str:
+    if name.startswith("globaltimer"):
+        return "T.cuda.globaltimer() (the 64-bit %globaltimer)"
+    if name.startswith("clock"):
+        return "T.cuda.clock64() (the 64-bit %clock64)"
+    return "a T.cuda.func_call helper with asm volatile"
+
+
 def check_mov_sreg_register(reg_name: str) -> None:
     """Reject a time-varying special register for the pure ``mov_sreg``."""
     name = str(reg_name).lstrip("%")
     if _TIME_VARYING_SREGS.match(name):
         raise ValueError(
             f"T.cuda.mov_sreg is pure and cannot read the time-varying register %{name}: two "
-            f"reads could be merged or moved. Use T.cuda.clock64() for the cycle counter, or a "
-            f"T.cuda.func_call helper with asm volatile"
+            f"reads could be merged or moved. Use {_sreg_replacement(name)} instead"
         )
 
 
