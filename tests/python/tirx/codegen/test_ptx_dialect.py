@@ -4490,80 +4490,17 @@ _CERT_PRELUDE = "#include <cstdint>\n#include <cuda_fp16.h>\n#include <cuda_bf16
 # sampled table variant.  The limit is on generated source (not helper count),
 # because helper sizes vary substantially across instruction families.
 _CERT_MAX_SOURCE_CHARS = 256 * 1024
-_CERT_HELPER_SIGNATURE_RE = re.compile(
-    r"\A__forceinline__ __device__ void (?P<helper>[A-Za-z_]\w*)\((?P<params>[^)]*)\) \{"
-)
-_CERT_PARAM_RE = re.compile(r"(?P<type>.+?)(?P<reference>&)?\s+(?P<name>__[A-Za-z_]\w*)\Z")
 
 
 def _certification_kernel(helper, helper_source, kernel_index):
-    """Keep a helper inline and call it from a retained, production-shaped kernel.
+    """The retained, production-shaped wrapper kernel for one helper.
 
-    Merely placing an unreferenced ``__forceinline__`` helper in a translation
-    unit does not certify it: nvcc may discard it before ptxas sees its body.
-    The old workaround stripped ``__forceinline__`` and retained the resulting
-    device function with RDC.  That changes the device ABI and is not an
-    equivalent compilation shape for wide inline-asm operands.
-
-    A global caller is retained without RDC and forces the original helper to
-    inline, which is the shape emitted code uses.  Pointer arguments come from
-    the runtime sink so address instructions are not specialized to null.
-    Register inputs are locals, avoiding an artificial device ABI boundary;
-    ordinary values and raw 32-bit addresses are loaded through the sink so
-    they keep the runtime data flow of generated calls.  Predicate and b128
-    inputs remain local because crossing either through the certification ABI
-    creates a tool-only compilation shape.  Written values are loaded and
-    stored through the sink so non-volatile output instructions cannot be
-    optimized away before ptxas.
+    Shared with ``gen_floors`` (the measured arch floors of ``VerifyPTXTarget``), so the two can
+    never certify different compilation shapes; its docstring explains the shape.
     """
-    match = _CERT_HELPER_SIGNATURE_RE.match(helper_source)
-    assert match is not None, f"cannot parse certification signature for {helper}"
-    assert match.group("helper") == helper
+    from tvm_tirx.backend.cuda.ptx.gen_floors import certification_kernel
 
-    declarations = []
-    arguments = []
-    stores = []
-    params = match.group("params")
-    parsed_params = params.split(", ") if params else ()
-    for param_index, param in enumerate(parsed_params):
-        param_match = _CERT_PARAM_RE.fullmatch(param)
-        assert param_match is not None, f"cannot parse {helper} parameter: {param}"
-        c_type = param_match.group("type")
-        param_name = param_match.group("name")
-        local = f"__cert_arg{param_index}"
-        input_offset = 16 * param_index
-        if c_type.endswith("*"):
-            declarations.append(f"  {c_type} {local} = __cert_sink + {input_offset};")
-        elif param_match.group("reference"):
-            declarations.append(
-                f"  {c_type} {local} = "
-                f"*reinterpret_cast<const {c_type}*>(__cert_sink + {input_offset});"
-            )
-        elif c_type in ("__int128_t", "__uint128_t") or param_name == "__pred":
-            declarations.append(f"  {c_type} {local}{{}};")
-        else:
-            declarations.append(
-                f"  {c_type} {local} = "
-                f"*reinterpret_cast<const {c_type}*>(__cert_sink + {input_offset});"
-            )
-        arguments.append(local)
-        if param_match.group("reference"):
-            # Every C binding is at most 16 bytes.  Distinct, aligned locations
-            # keep all outputs observable without imposing a constraint letter
-            # of our own on the value being certified.
-            stores.append(
-                f"  *reinterpret_cast<{c_type}*>(__cert_sink + "
-                f"{16 * (len(parsed_params) + len(stores))}) = {local};"
-            )
-
-    kernel = [
-        f'extern "C" __global__ void __ptx_cert_{kernel_index}(char* __cert_sink) {{',
-        *declarations,
-        f"  {helper}({', '.join(arguments)});",
-        *stores,
-        "}",
-    ]
-    return "\n".join((helper_source, *kernel))
+    return certification_kernel(helper, helper_source, kernel_index)
 
 
 def _append_certification(by_arch, arch, helper, helper_source):
