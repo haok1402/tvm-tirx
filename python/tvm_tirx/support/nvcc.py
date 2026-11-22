@@ -20,6 +20,7 @@
 import glob
 import os
 import platform
+import re
 import subprocess
 import warnings
 
@@ -205,6 +206,12 @@ def _find_cuda_target_include(cuda_path):
     return None
 
 
+# std:: type traits beyond is_same (which the generated header defines itself).
+_NEEDS_LIBCUXX_TRAITS = re.compile(
+    r"\bstd::(is_integral|is_signed|is_unsigned|is_floating_point|enable_if|conditional)"
+)
+
+
 def _compile_cuda_nvrtc(
     code, target_format=None, arch=None, options=None, path_target=None, use_nvshmem=False
 ):
@@ -333,28 +340,32 @@ using cuda::std::int64_t;
 #define __volatile__ volatile
 #endif
 
-// NVRTC does not pull in the host <math.h>, so INFINITY is undefined. Provide it
-// from libcu++ (same float +inf value nvcc's <math.h> yields).
-#include <cuda/std/limits>
+// NVRTC does not pull in the host <math.h>, so INFINITY is undefined. Provide float +inf
+// as a constant expression (NVRTC 13.2/13.4 accept __builtin_bit_cast in constexpr; they
+// reject __builtin_huge_valf). Not libcu++'s numeric_limits: <cuda/std/limits> puts ~500
+// constexpr statics into every module as device globals and constant-bank data (ISSUE-024).
 #ifndef INFINITY
-#define INFINITY (::cuda::std::numeric_limits<float>::infinity())
+#define INFINITY (__builtin_bit_cast(float, 0x7f800000u))
 #endif
 
 """
     code_filtered = nvrtc_preamble + code_filtered
 
-    # For NVSHMEM, add preamble to map cuda::std type traits to std namespace.
-    # NVSHMEM headers require std:: type traits but NVRTC uses cuda::std::.
-    if use_nvshmem:
+    # libcu++'s type traits, mapped into std::, only when something needs more than the
+    # std::is_same the generated header defines: NVSHMEM's headers, or source that names another
+    # trait. Including them otherwise costs every module the libcu++ statics (ISSUE-024).
+    if use_nvshmem or _NEEDS_LIBCUXX_TRAITS.search(code_filtered):
         nvshmem_preamble = """#include <cuda/std/type_traits>
+#define TVM_TIRX_LIBCUXX_TYPE_TRAITS 1
 
-// Map cuda::std type traits to std namespace for NVSHMEM headers
+// Map cuda::std type traits to std namespace (NVSHMEM headers, generated code)
 namespace std {
     using cuda::std::is_integral;
     using cuda::std::is_signed;
     using cuda::std::is_unsigned;
     using cuda::std::is_floating_point;
     using cuda::std::is_same;
+    using cuda::std::is_same_v;
     using cuda::std::enable_if;
     using cuda::std::conditional;
 }
