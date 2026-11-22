@@ -22,6 +22,7 @@ from tvm_tirx import ir as _ir
 from tvm_tirx.backend.cuda import op as _cuda_op
 from tvm_tirx.ir._expose_api import _init_exposed_op_api, _make_op_api
 from tvm_tirx.script.ir_builder.base import auto_emit_void_call as _auto_emit_void_call
+from tvm_tirx.tirx.script.ir_builder.op import bind_at_call_site as _bind_at_call_site
 
 from . import layout as layout
 from .axis import Axis as Axis
@@ -131,12 +132,7 @@ TCGen05InstrDescriptorBlockScaledAttrs = _cuda_op.TCGen05InstrDescriptorBlockSca
 iket = IketNamespace()
 wgmma = CudaWgmmaNamespace()
 tcgen05 = CudaTcgen05Namespace()
-warp_sum = _auto_emit_void_call(_cuda_op.warp_sum)
-warp_max = _auto_emit_void_call(_cuda_op.warp_max)
-warp_min = _auto_emit_void_call(_cuda_op.warp_min)
-cta_sum = _auto_emit_void_call(_cuda_op.cta_sum)
-cta_max = _auto_emit_void_call(_cuda_op.cta_max)
-cta_min = _auto_emit_void_call(_cuda_op.cta_min)
+
 func_call = _auto_emit_void_call(_cuda_op.func_call)
 sm100_2sm_leader_smem_addr = _auto_emit_void_call(_cuda_op.sm100_2sm_leader_smem_addr)
 timer_init = _auto_emit_void_call(_cuda_op.timer_init)
@@ -146,10 +142,8 @@ timer_finalize = _auto_emit_void_call(_cuda_op.timer_finalize)
 bmma_sync = _auto_emit_void_call(_cuda_op.bmma_sync)
 atomic_add = _auto_emit_void_call(_cuda_op.atomic_add)
 atomic_cas = _auto_emit_void_call(_cuda_op.atomic_cas)
-cta_reduce = _auto_emit_void_call(_cuda_op.cta_reduce)
 mov_sreg = _auto_emit_void_call(_cuda_op.mov_sreg)
 wait_until = _auto_emit_void_call(_cuda_op.wait_until)
-warp_reduce = _auto_emit_void_call(_cuda_op.warp_reduce)
 
 
 tile = _make_tensor_namespace()
@@ -282,3 +276,27 @@ def mbarrier_wait_parity(bar, phase, ticks=0x989680, *, sem="", scope=""):
             f"'cluster', got sem={sem!r}, scope={scope!r}"
         )
     return _mbarrier_wait_parity_op(bar, phase, ticks, sem, scope)
+
+
+# Warp collectives that return a value run once, where they are called; see bind_at_call_site.
+# elect_sync is left as a call: `if T.cuda.elect_sync():` is recognized structurally.
+broadcast_warpgroup_id = _bind_at_call_site(broadcast_warpgroup_id, "warpgroup_id")  # noqa: F821
+any_sync = _bind_at_call_site(any_sync, "vote")  # noqa: F821
+ballot_sync = _bind_at_call_site(ballot_sync, "ballot")  # noqa: F821
+reduce_add_sync_u32 = _bind_at_call_site(reduce_add_sync_u32, "reduced")  # noqa: F821
+reduce_min_sync_u32 = _bind_at_call_site(reduce_min_sync_u32, "reduced")  # noqa: F821
+__shfl_sync = _bind_at_call_site(__shfl_sync, "shuffled")  # noqa: F821
+__shfl_up_sync = _bind_at_call_site(__shfl_up_sync, "shuffled")  # noqa: F821
+__shfl_down_sync = _bind_at_call_site(__shfl_down_sync, "shuffled")  # noqa: F821
+__shfl_xor_sync = _bind_at_call_site(__shfl_xor_sync, "shuffled")  # noqa: F821
+warp_reduce = _bind_at_call_site(_cuda_op.warp_reduce, "reduced")
+warp_sum = _bind_at_call_site(_cuda_op.warp_sum, "reduced")
+warp_max = _bind_at_call_site(_cuda_op.warp_max, "reduced")
+warp_min = _bind_at_call_site(_cuda_op.warp_min, "reduced")
+# CTA-wide collectives: each contains __syncthreads, which every thread of the block must reach.
+cta_reduce = _bind_at_call_site(_cuda_op.cta_reduce, "reduced")
+cta_sum = _bind_at_call_site(_cuda_op.cta_sum, "reduced")
+cta_max = _bind_at_call_site(_cuda_op.cta_max, "reduced")
+cta_min = _bind_at_call_site(_cuda_op.cta_min, "reduced")
+syncthreads_and = _bind_at_call_site(syncthreads_and, "all_true")  # noqa: F821
+syncthreads_or = _bind_at_call_site(syncthreads_or, "any_true")  # noqa: F821

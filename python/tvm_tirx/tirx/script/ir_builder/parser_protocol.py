@@ -250,6 +250,11 @@ def bind_(
     if isinstance(ty, _native.LetAnnotation):
         if value is _base.MISSING:
             raise ValueError("An immutable binding requires an initializer")
+        if _op.take_call_site_binding(value):
+            # A warp collective already bound at its call site (bind_at_call_site): name that
+            # binding instead of adding another, after checking the annotation.
+            _ir.assert_structural_equal(value.ty, ty.as_var(rhs_dtype=value.ty).ty)
+            return _name(value, name, name_loc)
         value = _op._as_expr(value)
         if not isinstance(value, _ir.Var):
             _base.at_(value_loc, value)

@@ -18,7 +18,9 @@
 
 from __future__ import annotations
 
+import functools
 import sys
+import threading
 from collections.abc import Callable
 from typing import Any
 
@@ -562,16 +564,75 @@ cpu_parallel_barrier = _auto_emit_void_call(_tir_op.cpu_parallel_barrier)
 kernel_replace_point = _auto_emit_void_call(_tir_op.kernel_replace_point)
 
 
-gpu_warp_shuffle = _auto_emit_void_call(_tir_op.gpu_warp_shuffle)
+def name_of(func: Callable) -> str:
+    """The script-facing name of an op constructor, for messages."""
+    return getattr(func, "__name__", None) or repr(func)
 
 
-gpu_warp_shuffle_up = _auto_emit_void_call(_tir_op.gpu_warp_shuffle_up)
+def bind_at_call_site(func: Callable, name: str) -> Callable:
+    """Bind the result of a warp-collective call to a fresh variable where it is called.
+
+    A TIRx expression is a tree, so an unbound call is evaluated wherever its value is used.
+    A Python value used twice emits the call twice, and a use in the second operand of
+    ``T.Or`` / ``T.And`` or in an arm of ``T.Select`` / ``T.if_then_else`` runs it on only
+    the lanes that reach that operand. For a collective whose lanes must all participate
+    (``__shfl_sync`` with a full mask, ...), that is undefined behavior; on H200 the warp hangs.
+
+    The wrapped constructor therefore emits ``Bind(v, call)`` at the call site, in statement
+    order, and returns ``v``: the collective runs once, there, and later uses read ``v``. To run
+    a collective conditionally, call it inside an ``if`` statement. Calling it outside a kernel
+    body under construction (no active IR builder, e.g. precomputed in a Python kernel factory)
+    raises, since there is no call site to bind it at.
+    """
+
+    @functools.wraps(func)
+    def wrapped(*args, **kwargs):
+        if not IRBuilder.is_in_scope():
+            raise RuntimeError(
+                f"call {name_of(func)} inside the kernel body: a warp collective must be bound "
+                "where it runs, and outside an IR builder its value would be re-emitted at each "
+                "use, e.g. inside a short-circuit || where only some lanes run it"
+            )
+        value = func(*args, **kwargs)
+        if not isinstance(value, Call):
+            return value
+        from tvm_tirx.tirx.script.ir_builder.parser_protocol import (  # pylint: disable=import-outside-toplevel
+            bind_,
+        )
+
+        var = bind_(value, name=name)
+        _CALL_SITE_BINDING.last = var
+        return var
+
+    return wrapped
 
 
-gpu_warp_shuffle_down = _auto_emit_void_call(_tir_op.gpu_warp_shuffle_down)
+# The variable most recently bound by bind_at_call_site, in ``.last``. A parser binding of
+# exactly this object, e.g. ``x: T.let[T.int32] = T.cuda.__shfl_sync(...)``, names it instead of
+# binding it again, so printed IR round-trips without an extra variable. Per thread, like the
+# IR builder itself: kernels built concurrently must not see each other's record.
+_CALL_SITE_BINDING = threading.local()
 
 
-gpu_warp_shuffle_xor = _auto_emit_void_call(_tir_op.gpu_warp_shuffle_xor)
+def take_call_site_binding(value) -> bool:
+    """Whether value is the variable bind_at_call_site just bound; consumes the record."""
+    last = getattr(_CALL_SITE_BINDING, "last", None)
+    if last is not None and value is last:
+        _CALL_SITE_BINDING.last = None
+        return True
+    return False
+
+
+gpu_warp_shuffle = bind_at_call_site(_tir_op.gpu_warp_shuffle, "shuffled")
+
+
+gpu_warp_shuffle_up = bind_at_call_site(_tir_op.gpu_warp_shuffle_up, "shuffled")
+
+
+gpu_warp_shuffle_down = bind_at_call_site(_tir_op.gpu_warp_shuffle_down, "shuffled")
+
+
+gpu_warp_shuffle_xor = bind_at_call_site(_tir_op.gpu_warp_shuffle_xor, "shuffled")
 
 
 gpu_warp_activemask = _auto_emit_void_call(_tir_op.gpu_warp_activemask)
