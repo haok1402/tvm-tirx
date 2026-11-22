@@ -50,6 +50,7 @@ from tvm_tirx.tirx.op import call_intrin, reinterpret
 
 from .render import render_variant
 from .table import (
+    LD_CONSTANT_BANK_SPACES,
     InstructionEntry,
     escape_token,
     mods,
@@ -587,6 +588,13 @@ def _coerce_address(entry, slot, value, mod_map):
         raise ValueError(
             f"{entry.name}: operand '{slot.name}' must be a shared-scope pointer "
             f"or a uint32 shared address"
+        )
+    if space in LD_CONSTANT_BANK_SPACES and isinstance(ty, PtrType):
+        # A generic pointer is not a .param / .const address, and PTX has no implicit conversion:
+        # ld.param on one reads the wrong location. The caller converts it explicitly.
+        raise ValueError(
+            f"{entry.name}: operand '{slot.name}' is a .{space} address; convert the generic "
+            f"pointer with T.ptx.cvta.to.{space.split('::')[0]}.u64 and pass the uint64 result"
         )
     if isinstance(ty, PtrType):
         if ty.scope in (_SCOPE_SHARED, _SCOPE_SHARED_DYN):

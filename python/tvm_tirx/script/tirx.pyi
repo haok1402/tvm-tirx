@@ -861,6 +861,7 @@ class _Chain_ld:
     ca: _Chain_ld
     cg: _Chain_ld
     cluster: _Chain_ld
+    const: _Chain_ld
     cs: _Chain_ld
     cta: _Chain_ld
     cv: _Chain_ld
@@ -872,6 +873,8 @@ class _Chain_ld:
     lu: _Chain_ld
     mmio: _Chain_ld
     nc: _Chain_ld
+    param: _Chain_ld
+    param__entry: _Chain_ld
     proxy__readonly: _Chain_ld
     relaxed: _Chain_ld
     s16: _Chain_ld
