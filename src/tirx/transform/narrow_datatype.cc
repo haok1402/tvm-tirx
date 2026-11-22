@@ -32,7 +32,10 @@
 #include <tvm/tirx/stmt_functor_with_constraint_context.h>
 #include <tvm/tirx/transform.h>
 
+#include <algorithm>
+
 #include "../ir/data_type_rewriter.h"
+#include "ir_utils.h"
 
 namespace tvm {
 namespace tirx {
@@ -123,10 +126,32 @@ class DataTypeVisitor final : public StmtExprVisitorWithConstraintContext {
 
   ffi::Optional<VisitInterrupt> Visit_(const TensorLoadObj* op) {
     int tmp = bits_;
-    bits_ = target_bits_;
+    bits_ = IndexBits(op->source);
     TVM_FFI_S_VISIT_MAYBE_EARLY_RETURN(StmtExprVisitorWithConstraintContext::Visit_(op));
     bits_ = tmp;
     return std::nullopt;
+  }
+
+  ffi::Optional<VisitInterrupt> Visit_(const TensorStoreObj* op) {
+    int tmp = bits_;
+    bits_ = std::max(bits_, IndexBits(op->dest));
+    TVM_FFI_S_VISIT_MAYBE_EARLY_RETURN(StmtExprVisitorWithConstraintContext::Visit_(op));
+    bits_ = tmp;
+    return std::nullopt;
+  }
+
+  /*!
+   * \brief The narrowest index width for accesses to tensor.
+   *
+   * int32 index arithmetic is exact only within |v| < 2^30, since rewrites may add two index
+   * terms; an in-bounds index of a tensor with at most 2^30 elements is in that range. A larger
+   * tensor is indexed in int64 (see LowerTensorLayouts), and its indices must not be narrowed.
+   */
+  int IndexBits(const Expr& tensor) {
+    const auto* type = tensor->ty.as<TensorTypeObj>();
+    if (!type) return target_bits_;
+    analyzer_->SyncConstraintContext(constraints);
+    return TensorSpanExceedsInt32Index(type->shape, analyzer_.operator->()) ? 64 : target_bits_;
   }
 
   ffi::Optional<VisitInterrupt> Visit_(const ForObj* op) {

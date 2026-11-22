@@ -305,8 +305,35 @@ class LayoutApplier : public StmtExprMutatorWithConstraintContext {
     return VisitTensorAccess(std::move(load));
   }
 
+  /*!
+   * \brief Promote 32-bit indices of a tensor whose span may reach 2^30 elements to int64.
+   *
+   * int32 index arithmetic is only kept within |v| < 2^30 (see NarrowDataType), as rewrites may
+   * form sums of two index terms. A tensor with a static span of more than 2^30 elements, or one
+   * the analyzer proves that large, is indexed in int64. A symbolic span that cannot be proven
+   * large keeps its declared index type: its 32-bit shape variables assert that it is at most 2^30
+   * elements (checked under tirx.enable_debug; use int64 shape variables for larger tensors).
+   */
+  ffi::Array<PrimExpr> PromoteIndicesForSpan(const ffi::Array<PrimExpr>& flat_shape,
+                                             const ffi::Array<PrimExpr>& indices) {
+    bool narrow = false;
+    for (const auto& index : indices) {
+      PrimType ty = index.ty();
+      if (ty.MatchesCode(DLDataTypeCode::kDLInt, DLDataTypeCode::kDLUInt) && ty.bits() < 64) {
+        narrow = true;
+      }
+    }
+    if (!narrow) return indices;
+    if (!TensorSpanExceedsInt32Index(flat_shape, GetSyncedAnalyzer())) return indices;
+    ffi::Array<PrimExpr> promoted;
+    for (const auto& index : indices) {
+      promoted.push_back(index.ty().bits() < 64 ? prim::cast(index, PrimType::Int(64)) : index);
+    }
+    return promoted;
+  }
+
   ffi::Array<PrimExpr> GetSimplifiedElemOffset(const TensorVar& tensor,
-                                               const ffi::Array<PrimExpr>& indices) {
+                                               const ffi::Array<PrimExpr>& raw_indices) {
     // Remap the ty first since the type may depend on previously remapped value in mutator.
     auto logical_type = StmtExprMutatorWithConstraintContext::Mutate(ffi::AnyView(tensor.ty()),
                                                                      InplaceMode::kDisallow)
@@ -321,6 +348,7 @@ class LayoutApplier : public StmtExprMutatorWithConstraintContext {
       }
       auto layout = logical_type->layout.value();
       auto flat = GetFlattenedTensor(tensor);
+      ffi::Array<PrimExpr> indices = PromoteIndicesForSpan(flat.ty()->shape, raw_indices);
       auto pattern = MatchShapeStridePattern(flat.ty()).value();
       if (!prim::IsZero(pattern.get<2>())) {
         // The flat view retains this origin, so only lower its relative indices.
@@ -334,7 +362,9 @@ class LayoutApplier : public StmtExprMutatorWithConstraintContext {
       TVM_FFI_ICHECK_EQ(res.size(), 1) << "Expected a single element offset";
       return {GetSyncedAnalyzer()->Simplify((*res.begin()).second)};
     }
-    auto flattened_indices = logical_type->ElemOffset(indices);
+    // Without a layout the tensor is compact: its span is the product of its shape.
+    auto flattened_indices =
+        logical_type->ElemOffset(PromoteIndicesForSpan(logical_type->shape, raw_indices));
     TVM_FFI_ICHECK_EQ(flattened_indices.size(), 1) << "Expected a single element offset";
     return {GetSyncedAnalyzer()->Simplify(flattened_indices[0])};
   }

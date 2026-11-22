@@ -231,7 +231,22 @@ element type, ``ir.PrimType("float32")``.
 The function has two other kinds of variables. The symbolic dimension
 ``n`` comes from ``n = T.dynamic("n")``. It is an int32 ``Var`` that
 stands for a size known only when the function is called, and it appears
-in ``A``'s shape above. The loop index ``i`` is defined by
+in ``A``'s shape above.
+
+.. important::
+
+   **Index-width contract for symbolic shapes.** A tensor with 32-bit
+   dimensions is indexed with 32-bit arithmetic. That is exact only while
+   the tensor spans at most 2^30 elements, because index rewrites may add
+   two index terms. A tensor with a larger *static* span is indexed in
+   int64 automatically. A symbolic span cannot be checked at compile time,
+   so an int32 shape variable such as ``n`` asserts that its tensors stay
+   within 2^30 elements. Declare ``T.dynamic("n", "int64")`` for tensors
+   that may be larger. Compiling with
+   ``PassContext(config={"tirx.enable_debug": True})`` adds a host-side
+   check of this assertion on every call. The check uses the product of
+   the argument's shape; strides are not included, so a strided view whose
+   storage extends further is not covered. The loop index ``i`` is defined by
 ``for i in range(n)``. It is an int32 ``Var`` that the loop body uses to
 read ``A[i]`` and write ``B[i]``.
 

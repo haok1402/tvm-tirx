@@ -133,7 +133,8 @@ def test_multilanes(m, input_dtype, target_bits, expected_dtype):
     tvm_tirx.ir.assert_structural_equal(After, Expected)
 
 
-@pytest.mark.parametrize("n,expected_dtype", [(2**15, "int32"), (2**15 + 1, "int64")])
+# B has 2^16 * n elements; indices of a tensor of more than 2^30 elements stay int64.
+@pytest.mark.parametrize("n,expected_dtype", [(2**14, "int32"), (2**14 + 1, "int64")])
 def test_slice(n, expected_dtype):
     Before = _index_module(2**15, n, "int64", "int64", "slice")
     Expected = _index_module(2**15, n, "int64", expected_dtype, "slice")

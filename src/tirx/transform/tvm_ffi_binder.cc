@@ -27,6 +27,7 @@
 #include <tvm/ir/expr_functor.h>
 #include <tvm/ir/prim/expr.h>
 #include <tvm/ir/prim/op.h>
+#include <tvm/ir/transform.h>
 #include <tvm/runtime/device_api.h>
 #include <tvm/runtime/logging.h>
 #include <tvm/tirx/op/abi.h>
@@ -778,6 +779,34 @@ Expr TVMFFIABIBuilder::DecodeParamDLTensor(const TensorVar& tensor, const PrimEx
       BindScalar(shape, value, shape_k_path, true);
     } else {
       pending_int_exprs_.push_back({shape, value, shape_k_path});
+    }
+  }
+
+  // ── Section: int32 index span (tirx.enable_debug) ──────────────
+  // A symbolic shape with 32-bit dimensions keeps 32-bit index arithmetic, which is valid only
+  // for spans of at most 2^30 elements (see LowerTensorLayouts and NarrowDataType). Check it here.
+  // The span is the product of the shape: strides and the layout of a strided view are not
+  // included, so a view whose storage extends further is not covered by this check.
+  if (transform::PassContext::Current()->GetConfig<bool>("tirx.enable_debug").value_or(false)) {
+    // The flat index stays 32-bit only when every dimension is; one int64 dimension makes the
+    // offset arithmetic int64.
+    bool symbolic = false, narrow = true;
+    for (const auto& extent : tensor.shape()) {
+      PrimExpr dim = extent.as_or_throw<PrimExpr>();
+      if (!dim.as<IntImmObj>()) symbolic = true;
+      if (dim.ty().bits() >= 64) narrow = false;
+    }
+    if (symbolic && narrow) {
+      PrimExpr span = prim::MakeConst(PrimType::Float(64), 1.0);
+      for (size_t k = 0; k < tensor.shape().size(); ++k) {
+        span = span * cast(LoadInt64ArrayElem(shape_ptr, static_cast<int>(k)), PrimType::Float(64));
+      }
+      EmitAssert(
+          span <= prim::MakeConst(PrimType::Float(64), static_cast<double>(int64_t{1} << 30)),
+          "ValueError", buf_name, " on argument #", std::to_string(param_index), when_calling_imm_,
+          sig_imm_,
+          "` spans more than 2^30 elements, but its symbolic shape has 32-bit dimensions; ",
+          "declare int64 shape variables for tensors this large");
     }
   }
 

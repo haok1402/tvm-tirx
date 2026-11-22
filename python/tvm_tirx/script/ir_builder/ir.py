@@ -57,6 +57,17 @@ def dynamic(name: str, dtype: str = "int32", *, loc: LocationEntry | Location = 
     Var
         A fresh symbol. Reuse this object to share dimensions across annotations
         and function bodies, including outside an ``I.ir_module`` definition.
+
+    Notes
+    -----
+    **Index-width contract.** A tensor whose shape uses 32-bit dimensions is indexed with
+    32-bit arithmetic, which is exact only while its span is at most 2^30 elements: index
+    rewrites may add two index terms. A tensor with a larger static span is indexed in
+    int64 automatically. A symbolic span cannot be checked at compile time, so 32-bit shape
+    variables assert that their tensors stay within 2^30 elements. Use ``dtype="int64"`` for
+    tensors that may be larger. With ``tirx.enable_debug`` the host checks this assertion on
+    every call, using the product of the argument's shape; strides are not included, so a
+    strided view whose storage extends further is not covered.
     """
     return Var(name, dtype, loc.loc if isinstance(loc, LocationEntry) else loc)
 
