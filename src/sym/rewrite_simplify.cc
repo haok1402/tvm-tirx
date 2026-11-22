@@ -50,6 +50,19 @@ TVM_FFI_INLINE bool IsVectorExpr(const ExprObj* expr) {
   return ty.IsScalableVector() || ty.IsFixedLengthVector();
 }
 
+/*!
+ * \brief Whether a value of this expression's type can be NaN.
+ *
+ * IEEE 754 comparisons with a NaN operand are unordered: `x == x` is false, `x != x` is true,
+ * and `!(x < y)` is true while `y <= x` is false. Kernels test for NaN with exactly these
+ * forms (`x != x`), so comparison identities that only hold for ordered values must not fire
+ * for floating-point operands of any width or format.
+ */
+TVM_FFI_INLINE bool MayBeNaN(const PrimExpr& expr) {
+  return !expr.ty().MatchesCode(DLDataTypeCode::kDLInt, DLDataTypeCode::kDLUInt,
+                                DLDataTypeCode::kDLBool, DLDataTypeCode::kDLOpaqueHandle);
+}
+
 }  // namespace
 
 TVM_FFI_STATIC_INIT_BLOCK() { RewriteSimplifierStatsObj::RegisterReflection(); }
@@ -1685,12 +1698,11 @@ PrimExpr RewriteSimplifier::Impl::ApplyRewriteRules(prim::EQ ret, InplaceMode in
     // Mimic the cancellation rules for SubObj.  For Index datatypes,
     // we skip the check for side effects.
     //
-    // These simplifications do not preserve NaN/Inf that may occur in
-    // the inputs.  For IEEE floats, `NaN - NaN` is `NaN`, and does
-    // not cancel out.  However, since models should not encounter NaN
-    // in the first place, this allows better simplification for the
-    // supported path.
-    TVM_TRY_REWRITE_IF(x == x, ctrue, SideEffect(x.Eval()) <= CallEffectKind::kReadState);
+    // Not for floating-point operands: `x == x` is false for NaN, and `x != x` (which
+    // reaches here as `!(x == x)`) is the standard NaN test.
+    TVM_TRY_REWRITE_IF(x == x, ctrue,
+                       !MayBeNaN(x.Eval()) &&
+                           SideEffect(x.Eval()) <= CallEffectKind::kReadState);
   }
   return ret;
 }
@@ -1742,6 +1754,8 @@ UnchangedOr<PrimExpr> RewriteSimplifier::Impl::Mutate_(const prim::LEObj* op,
 
   if (auto const_res = TryConstFold<prim::LE>(op->a, op->b)) return *std::move(const_res);
   if (auto match = TryMatchLiteralConstraint(ret)) return match.value();
+  // `a <= b` is not `!(b < a)` when an operand can be NaN.
+  if (MayBeNaN(op->a)) return ret;
 
   // Check for applicable rewrites before attempting to prove/disprove
   // the inequality.  This preserves earlier behavior, where (A<=B*x)
@@ -1994,10 +2008,12 @@ PrimExpr RewriteSimplifier::Impl::ApplyRewriteRules(prim::Not ret, InplaceMode i
   // Pattern var to match any expression
   PVar<PrimExpr> x, y;
   TVM_TRY_REWRITE(!(!x), x);
-  TVM_TRY_REWRITE(!(x <= y), y < x);
-  TVM_TRY_REWRITE(!(x >= y), x < y);
-  TVM_TRY_REWRITE(!(x < y), y <= x);
-  TVM_TRY_REWRITE(!(x > y), x <= y);
+  // The negation of an ordered comparison is true when an operand is NaN, so it is not the
+  // reversed comparison for floating-point operands.
+  TVM_TRY_REWRITE_IF(!(x <= y), y < x, !MayBeNaN(x.Eval()));
+  TVM_TRY_REWRITE_IF(!(x >= y), x < y, !MayBeNaN(x.Eval()));
+  TVM_TRY_REWRITE_IF(!(x < y), y <= x, !MayBeNaN(x.Eval()));
+  TVM_TRY_REWRITE_IF(!(x > y), x <= y, !MayBeNaN(x.Eval()));
   TVM_TRY_REWRITE(!(x == y), x != y);
   TVM_TRY_REWRITE(!(x != y), x == y);
   TVM_TRY_RECURSIVE_REWRITE(!(x || y), (!x) && (!y));
@@ -2134,10 +2150,11 @@ UnchangedOr<PrimExpr> RewriteSimplifier::Impl::Mutate_(const prim::OrObj* op,
   TVM_TRY_REWRITE(x == y || x != y, ctrue);
   TVM_TRY_REWRITE(x != y || x == y, ctrue);
   TVM_TRY_REWRITE(x || !x, ctrue);
-  TVM_TRY_REWRITE(x <= y || y < x, ctrue);
-  TVM_TRY_REWRITE(y < x || x <= y, ctrue);
+  // Both ordered comparisons are false when an operand is NaN.
+  TVM_TRY_REWRITE_IF(x <= y || y < x, ctrue, !MayBeNaN(x.Eval()));
+  TVM_TRY_REWRITE_IF(y < x || x <= y, ctrue, !MayBeNaN(x.Eval()));
 
-  TVM_TRY_REWRITE(x < y || y < x, x != y);
+  TVM_TRY_REWRITE_IF(x < y || y < x, x != y, !MayBeNaN(x.Eval()));
 
   TVM_TRY_REWRITE_IF(x < c1 || c2 < x, ctrue, c2.Eval()->value < c1.Eval()->value);
   TVM_TRY_REWRITE_IF(c2 < x || x < c1, ctrue, c2.Eval()->value < c1.Eval()->value);
